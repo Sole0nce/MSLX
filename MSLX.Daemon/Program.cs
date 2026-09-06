@@ -188,6 +188,7 @@ builder.WebHost.ConfigureKestrel(serverOptions =>
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddSingleton<MSLX.Daemon.Services.ResourceServices.ModDictionaryService>();
 
 // 跨域请求配置
 builder.Services.AddCors(options =>
