@@ -320,7 +320,7 @@ onUnmounted(async () => {
       </div>
 
       <div class="flex items-center gap-2 sm:gap-3 flex-wrap">
-        <t-button variant="outline" theme="default" class="!rounded-lg" @click="changeUrl(DOC_URLS.multi_nodes_doc)">
+        <t-button variant="outline" theme="default" @click="changeUrl(DOC_URLS.multi_nodes_doc)">
           <template #icon><help-circle-icon /></template>
           文档
         </t-button>
