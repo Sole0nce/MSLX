@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.StaticFiles;
 using MSLX.Daemon.Utils;
 using MSLX.Daemon.Utils.ConfigUtils;
 using MSLX.SDK.Models;
@@ -10,6 +11,14 @@ namespace MSLX.Daemon.Controllers.FilesControllers;
 [Route("api/files")]
 public class FilesListController : ControllerBase
 {
+    private static readonly FileExtensionContentTypeProvider _contentTypeProvider = new()
+    {
+        Mappings =
+        {
+            [".mkv"] = "video/x-matroska",
+            [".flv"] = "video/x-flv"
+        }
+    };
     // 获取文件列表
     [HttpGet("instance/{id}/lists")]
     public IActionResult GetFilesList(uint id, [FromQuery] string? path = "")
@@ -334,9 +343,9 @@ public class FilesListController : ControllerBase
         }
     }
 
-    // 下载文件
+    // 下载或在线预览文件
     [HttpGet("instance/{id}/download")]
-    public IActionResult DownloadFile(uint id, [FromQuery] string path)
+    public IActionResult DownloadFile(uint id, [FromQuery] string path, [FromQuery] bool inline = false)
     {
         if (!IConfigBase.UserList.HasResourcePermission(User?.FindFirst("UserId")?.Value ?? "", "server", (int)id))
             return NotFound(ApiResponseService.NotFound());
@@ -351,6 +360,20 @@ public class FilesListController : ControllerBase
         if (!System.IO.File.Exists(targetPath)) return NotFound("文件不存在");
 
         if (Directory.Exists(targetPath)) return BadRequest("无法直接下载文件夹");
+
+        if (inline)
+        {
+            if (!_contentTypeProvider.TryGetContentType(targetPath, out var contentType))
+            {
+                contentType = "application/octet-stream";
+            }
+            return PhysicalFile(
+                targetPath,
+                contentType,
+                enableRangeProcessing: true
+            );
+        }
+
         return PhysicalFile(
             targetPath,
             "application/octet-stream",

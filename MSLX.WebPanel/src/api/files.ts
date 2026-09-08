@@ -1,4 +1,5 @@
 import { request } from '@/utils/request';
+import { TOKEN_NAME, BASE_URL_NAME } from '@/config/global';
 import {
   FilesListModel,
   HostDriveItem,
@@ -117,6 +118,29 @@ export function downloadFileStream(instanceId: number, path: string) {
     params: { path },
     responseType: 'blob',
   });
+}
+
+export function getVideoStreamUrl(instanceId: number, path: string): string {
+  const token = localStorage.getItem(TOKEN_NAME);
+  const baseUrl = localStorage.getItem(BASE_URL_NAME);
+  const activeNodeId = localStorage.getItem('ACTIVE_NODE_ID');
+  const activeNodeUrl = localStorage.getItem('ACTIVE_NODE_URL');
+
+  let finalBase = baseUrl || window.location.origin;
+  if (activeNodeUrl && activeNodeId !== 'local') {
+    finalBase = activeNodeUrl;
+  }
+
+  const url = new URL(`/api/files/instance/${instanceId}/download`, finalBase);
+  url.searchParams.append('path', path);
+  url.searchParams.append('inline', 'true');
+  if (token) {
+    url.searchParams.append('x-user-token', token);
+  }
+  if (activeNodeId && activeNodeId !== 'local') {
+    url.searchParams.append('x-node-id', activeNodeId);
+  }
+  return url.toString();
 }
 
 export function startCompress(instanceId: number, sources: string[], targetName: string, currentPath: string) {

@@ -28,6 +28,7 @@ import {
   FilterIcon,
   EditIcon,
   FolderAddIcon,
+  VideoIcon,
 } from 'tdesign-icons-vue-next';
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next';
 import {
@@ -35,6 +36,7 @@ import {
   createDirectory,
   deleteFiles,
   downloadFileStream,
+  getVideoStreamUrl,
   getFileContent,
   getInstanceFilesList,
   moveFiles,
@@ -45,6 +47,7 @@ import type { FilesListModel } from '@/api/model/files';
 import FileEditor from './components/FileEditor.vue';
 import FileUploader from './components/FileUploader.vue';
 import ImagePreview from './components/ImagePreview.vue';
+import VideoPreview from './components/VideoPreview.vue';
 import FileCompressor from './components/FileCompressor.vue';
 import FileDecompress from './components/FileDecompress.vue';
 import FilePermission from './components/FilePermission.vue';
@@ -73,6 +76,7 @@ const isMobile = computed(() => screenWidth.value < 768);
 // 各类弹窗状态
 const showEditor = ref(false);
 const showImagePreview = ref(false);
+const showVideoPreview = ref(false);
 const showCreateDialog = ref(false);
 const showRenameDialog = ref(false);
 const showBatchUploader = ref(false);
@@ -91,6 +95,7 @@ const editorSaveSuccess = ref(0);
 const editorDirty = ref(false);
 const previewFileName = ref('');
 const previewUrl = ref('');
+const videoPreviewUrl = ref('');
 const newFileName = ref('');
 const renameNewName = ref('');
 const renameTargetObj = ref<{ name: string; fullPath: string } | null>(null);
@@ -106,6 +111,11 @@ const handleResize = () => {
 const isImage = (name: string) => {
   const ext = name.split('.').pop()?.toLowerCase();
   return ['png', 'jpg', 'jpeg', 'gif', 'ico', 'webp', 'bmp', 'svg'].includes(ext || '');
+};
+
+const isVideo = (name: string) => {
+  const ext = name.split('.').pop()?.toLowerCase();
+  return ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'flv', 'avi', 'm4v', 'ts', '3gp'].includes(ext || '');
 };
 
 const isArchive = (name: string) => {
@@ -126,6 +136,7 @@ const getFileIcon = (row: FilesListModel) => {
   const ext = row.name.split('.').pop()?.toLowerCase();
   if (['png', 'jpg', 'jpeg', 'gif', 'ico', 'webp'].includes(ext || ''))
     return { icon: FileImageIcon, color: 'var(--td-success-color)' };
+  if (isVideo(row.name)) return { icon: VideoIcon, color: '#0052d9' };
   if (['jar', 'zip', 'rar', '7z', 'tar', 'gz'].includes(ext || '')) return { icon: FileZipIcon, color: '#722ed1' };
   if (['yml', 'yaml', 'json', 'properties', 'toml', 'xml', 'conf', 'sh', 'bat', 'cmd'].includes(ext || ''))
     return { icon: CodeIcon, color: 'var(--td-warning-color)' };
@@ -232,11 +243,22 @@ const openPreview = async (fileName: string) => {
   }
 };
 
+const openVideoPreview = (fileName: string) => {
+  const fullPath = currentPath.value ? `${currentPath.value}/${fileName}` : fileName;
+  videoPreviewUrl.value = getVideoStreamUrl(instanceId.value, fullPath);
+  previewFileName.value = fileName;
+  showVideoPreview.value = true;
+};
+
 const openEditor = async (fileName: string, isNewFile = false) => {
   if (isNewFile) {
     editorFileName.value = fileName;
     editorContent.value = '';
     showEditor.value = true;
+    return;
+  }
+  if (isVideo(fileName)) {
+    openVideoPreview(fileName);
     return;
   }
   if (isImage(fileName)) {
@@ -364,6 +386,8 @@ const handleRowClick = (row: any) => {
     const separator = currentPath.value === '' ? '' : '/';
     const targetPath = `${currentPath.value}${separator}${row.name}`;
     router.push({ query: { ...route.query, path: targetPath || undefined } });
+  } else if (isVideo(row.name)) {
+    openVideoPreview(row.name);
   } else if (isImage(row.name)) {
     openPreview(row.name);
   } else {
@@ -906,11 +930,12 @@ onUnmounted(() => {
                     <t-dropdown-item
                       v-if="!(row.type === 'folder' || isArchive(row.name))"
                       value="edit"
-                      @click="isImage(row.name) ? openPreview(row.name) : openEditor(row.name)"
+                      @click="isVideo(row.name) ? openVideoPreview(row.name) : isImage(row.name) ? openPreview(row.name) : openEditor(row.name)"
                     >
-                      <image-icon v-if="isImage(row.name)" class="mr-2" />
+                      <video-icon v-if="isVideo(row.name)" class="mr-2" />
+                      <image-icon v-else-if="isImage(row.name)" class="mr-2" />
                       <edit-icon v-else class="mr-2" />
-                      <span>{{ isImage(row.name) ? '预览' : '编辑' }}</span>
+                      <span>{{ isVideo(row.name) || isImage(row.name) ? '预览' : '编辑' }}</span>
                     </t-dropdown-item>
 
                     <t-dropdown-item v-if="hasPermissionSupport" value="permission" @click="handleOpenPermission(row)">
@@ -1093,6 +1118,7 @@ onUnmounted(() => {
       @success="handleUploadSuccess"
     />
     <image-preview v-model:visible="showImagePreview" :file-name="previewFileName" :image-blob-url="previewUrl" />
+    <video-preview v-model:visible="showVideoPreview" :file-name="previewFileName" :video-url="videoPreviewUrl" />
     <file-compressor
       v-model:visible="showCompressor"
       :instance-id="instanceId"
