@@ -12,6 +12,7 @@ import {
   FileAddIcon,
   FileIcon,
   FileImageIcon,
+  ImageIcon,
   FilePasteIcon,
   FileZipIcon,
   FolderIcon,
@@ -29,6 +30,8 @@ import {
   EditIcon,
   FolderAddIcon,
   VideoIcon,
+  ViewListIcon,
+  ViewModuleIcon,
 } from 'tdesign-icons-vue-next';
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next';
 import {
@@ -52,6 +55,7 @@ import FileCompressor from './components/FileCompressor.vue';
 import FileDecompress from './components/FileDecompress.vue';
 import FilePermission from './components/FilePermission.vue';
 import FileOfflineDownloader from './components/FileOfflineDownloader.vue';
+import FileGridView from './components/FileGridView.vue';
 import { changeUrl } from '@/router';
 import { useUserStore } from '@/store';
 
@@ -65,6 +69,11 @@ const loading = ref(false);
 const fileList = ref<FilesListModel[]>([]);
 const currentPath = ref('');
 const selectedRowKeys = ref<string[]>([]);
+const viewMode = ref<'list' | 'grid'>((localStorage.getItem('mslx_file_view_mode') as 'list' | 'grid') || 'list');
+const setViewMode = (mode: 'list' | 'grid') => {
+  viewMode.value = mode;
+  localStorage.setItem('mslx_file_view_mode', mode);
+};
 const isFileDragOver = ref(false);
 const fileDragCounter = ref(0);
 const droppedUploadItems = ref<Array<{ file: File; path: string }>>([]);
@@ -815,6 +824,20 @@ onUnmounted(() => {
             <template #prefixIcon><filter-icon class="text-zinc-400" /></template>
           </t-select>
 
+          <t-radio-group
+            :value="viewMode"
+            variant="default-filled"
+            class="!rounded-lg overflow-hidden shrink-0 shadow-sm"
+            @change="(val: any) => setViewMode(val)"
+          >
+            <t-radio-button value="list">
+              <template #default><view-list-icon /></template>
+            </t-radio-button>
+            <t-radio-button value="grid">
+              <template #default><view-module-icon /></template>
+            </t-radio-button>
+          </t-radio-group>
+
           <t-button
             variant="outline"
             size="medium"
@@ -863,7 +886,31 @@ onUnmounted(() => {
         @dragleave.prevent="handleFileDragLeave"
         @drop.prevent="handleFileDrop"
       >
+        <!-- 大图标网格视图 -->
+        <file-grid-view
+          v-if="viewMode === 'grid'"
+          v-model:selected-row-keys="selectedRowKeys"
+          :file-list="filteredFileList"
+          :instance-id="instanceId"
+          :current-path="currentPath"
+          :is-mobile="isMobile"
+          :has-permission-support="hasPermissionSupport"
+          :loading="loading"
+          @row-click="handleRowClick"
+          @open-editor="openEditor"
+          @open-preview="openPreview"
+          @open-video-preview="openVideoPreview"
+          @download="handleDownload"
+          @rename="handleOpenRename"
+          @delete="handleDelete"
+          @compress="handleCompress"
+          @decompress="handleOpenDecompress"
+          @permission="handleOpenPermission"
+        />
+
+        <!-- 列表视图 -->
         <t-table
+          v-else
           v-model:selected-row-keys="selectedRowKeys"
           :data="filteredFileList"
           :columns="columns as any"

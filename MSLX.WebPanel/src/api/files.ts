@@ -143,6 +143,29 @@ export function getVideoStreamUrl(instanceId: number, path: string): string {
   return url.toString();
 }
 
+export function getFileThumbnailUrl(instanceId: number, path: string, size = 256): string {
+  const token = localStorage.getItem(TOKEN_NAME);
+  const baseUrl = localStorage.getItem(BASE_URL_NAME);
+  const activeNodeId = localStorage.getItem('ACTIVE_NODE_ID');
+  const activeNodeUrl = localStorage.getItem('ACTIVE_NODE_URL');
+
+  let finalBase = baseUrl || window.location.origin;
+  if (activeNodeUrl && activeNodeId !== 'local') {
+    finalBase = activeNodeUrl;
+  }
+
+  const url = new URL(`/api/files/instance/${instanceId}/thumbnail`, finalBase);
+  url.searchParams.append('path', path);
+  url.searchParams.append('size', size.toString());
+  if (token) {
+    url.searchParams.append('x-user-token', token);
+  }
+  if (activeNodeId && activeNodeId !== 'local') {
+    url.searchParams.append('x-node-id', activeNodeId);
+  }
+  return url.toString();
+}
+
 export function startCompress(instanceId: number, sources: string[], targetName: string, currentPath: string) {
   return request.post({
     url: `/api/files/instance/${instanceId}/compress`,

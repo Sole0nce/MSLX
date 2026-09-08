@@ -1,9 +1,13 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
 using MSLX.Daemon.Utils;
 using MSLX.Daemon.Utils.ConfigUtils;
 using MSLX.SDK.Models;
 using MSLX.SDK.Models.Files;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Processing;
 
 namespace MSLX.Daemon.Controllers.FilesControllers;
 
@@ -380,6 +384,88 @@ public class FilesListController : ControllerBase
             Path.GetFileName(targetPath),
             enableRangeProcessing: true
         );
+    }
+
+    // 获取图片缩略图
+    [HttpGet("instance/{id}/thumbnail")]
+    public async Task<IActionResult> GetFileThumbnail(uint id, [FromQuery] string path, [FromQuery] int size = 256)
+    {
+        if (!IConfigBase.UserList.HasResourcePermission(User?.FindFirst("UserId")?.Value ?? "", "server", (int)id))
+            return NotFound(ApiResponseService.NotFound());
+
+        var server = IConfigBase.ServerList.GetServer(id);
+        if (server == null) return NotFound("实例不存在");
+
+        if (string.IsNullOrEmpty(path)) return BadRequest("路径不能为空");
+
+        var check = FileUtils.GetSafePath(server.Base, path);
+        if (!check.IsSafe) return BadRequest("非法路径");
+
+        string targetPath = check.FullPath;
+        if (!System.IO.File.Exists(targetPath)) return NotFound("文件不存在");
+
+        string ext = Path.GetExtension(targetPath).ToLowerInvariant();
+        if (ext == ".svg")
+        {
+            Response.Headers.CacheControl = "public, max-age=604800";
+            return PhysicalFile(targetPath, "image/svg+xml");
+        }
+
+        var supportedImageExts = new HashSet<string> { ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico", ".tiff", ".tga" };
+        if (!supportedImageExts.Contains(ext))
+        {
+            return BadRequest("不支持生成该格式的缩略图");
+        }
+
+        size = Math.Clamp(size, 32, 1024);
+
+        try
+        {
+            var fileInfo = new FileInfo(targetPath);
+            long ticks = fileInfo.LastWriteTimeUtc.Ticks;
+            long fileLength = fileInfo.Length;
+
+            // MD5 哈希  path + ticks + fileLength + size 作为缓存key
+            string cacheKey;
+            using (var md5 = MD5.Create())
+            {
+                byte[] hashBytes = md5.ComputeHash(Encoding.UTF8.GetBytes($"{path}_{ticks}_{fileLength}_{size}"));
+                cacheKey = Convert.ToHexString(hashBytes).ToLowerInvariant();
+            }
+
+            string cacheDir = Path.Combine(IConfigBase.GetAppDataPath(), "Temp", "Thumbnails", id.ToString());
+            if (!Directory.Exists(cacheDir))
+            {
+                Directory.CreateDirectory(cacheDir);
+            }
+
+            string cacheFile = Path.Combine(cacheDir, $"{cacheKey}.webp");
+            if (System.IO.File.Exists(cacheFile))
+            {
+                Response.Headers.CacheControl = "public, max-age=604800, stale-while-revalidate=86400";
+                return PhysicalFile(cacheFile, "image/webp");
+            }
+
+            // 生成缩略图
+            using (var image = await SixLabors.ImageSharp.Image.LoadAsync(targetPath))
+            {
+                image.Mutate(x => x.Resize(new ResizeOptions
+                {
+                    Size = new SixLabors.ImageSharp.Size(size, size),
+                    Mode = ResizeMode.Crop
+                }));
+
+                // 保存 WebP
+                await image.SaveAsWebpAsync(cacheFile);
+            }
+
+            Response.Headers.CacheControl = "public, max-age=604800, stale-while-revalidate=86400";
+            return PhysicalFile(cacheFile, "image/webp");
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, $"缩略图生成失败: {ex.Message}");
+        }
     }
 
     // 复制文件或文件夹
