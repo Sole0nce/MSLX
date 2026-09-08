@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import {
   AppIcon,
   CodeIcon,
@@ -33,17 +33,17 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'update:selectedRowKeys', keys: string[]): void;
-  (e: 'row-click', row: FilesListModel): void;
-  (e: 'open-editor', fileName: string): void;
-  (e: 'open-preview', fileName: string): void;
-  (e: 'open-video-preview', fileName: string): void;
-  (e: 'download', row: FilesListModel): void;
-  (e: 'rename', row: FilesListModel): void;
-  (e: 'delete', row: FilesListModel): void;
-  (e: 'compress'): void;
-  (e: 'decompress', row: FilesListModel): void;
-  (e: 'permission', row: FilesListModel): void;
+  'update:selectedRowKeys': [keys: string[]];
+  'row-click': [row: FilesListModel];
+  'open-editor': [fileName: string];
+  'open-preview': [fileName: string];
+  'open-video-preview': [fileName: string];
+  download: [row: FilesListModel];
+  rename: [row: FilesListModel];
+  delete: [row: FilesListModel];
+  compress: [];
+  decompress: [row: FilesListModel];
+  permission: [row: FilesListModel];
 }>();
 
 // 视口内卡片懒加载状态追踪
