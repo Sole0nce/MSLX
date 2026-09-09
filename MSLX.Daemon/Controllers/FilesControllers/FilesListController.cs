@@ -25,7 +25,14 @@ public class FilesListController : ControllerBase
     };
     // 获取文件列表
     [HttpGet("instance/{id}/lists")]
-    public IActionResult GetFilesList(uint id, [FromQuery] string? path = "")
+    public IActionResult GetFilesList(
+        uint id, 
+        [FromQuery] string? path = "",
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 0,
+        [FromQuery] string? search = null,
+        [FromQuery] string? sort = "name",
+        [FromQuery] string? order = "asc")
     {
         if (!IConfigBase.UserList.HasResourcePermission(User?.FindFirst("UserId")?.Value ?? "", "server", (int)id))
             return NotFound(ApiResponseService.NotFound());
@@ -66,44 +73,146 @@ public class FilesListController : ControllerBase
             }
 
             var directoryInfo = new DirectoryInfo(targetPath);
-            var resultList = new List<FileItem>();
 
-            var dirs = directoryInfo.GetDirectories();
-            foreach (var dir in dirs)
+            // 没有指定pagesize 那么默认走全量
+            if (pageSize <= 0)
             {
-                resultList.Add(new FileItem
+                var resultList = new List<FileItem>();
+
+                var dirs = directoryInfo.GetDirectories();
+                foreach (var dir in dirs)
                 {
-                    Name = dir.Name,
-                    Type = "folder",
-                    Size = 0, 
-                    LastModified = dir.LastWriteTime,
-                    Permission = GetUnixPermissionSafe(dir)
+                    resultList.Add(new FileItem
+                    {
+                        Name = dir.Name,
+                        Type = "folder",
+                        Size = 0, 
+                        LastModified = dir.LastWriteTime,
+                        Permission = GetUnixPermissionSafe(dir)
+                    });
+                }
+
+                var files = directoryInfo.GetFiles();
+                foreach (var file in files)
+                {
+                    resultList.Add(new FileItem
+                    {
+                        Name = file.Name,
+                        Type = "file",
+                        Size = file.Length,
+                        LastModified = file.LastWriteTime,
+                        Permission = GetUnixPermissionSafe(file)
+                    });
+                }
+
+                var sortedList = resultList
+                    .OrderByDescending(x => x.Type == "folder") 
+                    .ThenBy(x => x.Name) 
+                    .ToList();
+
+                return Ok(new ApiResponse<List<FileItem>>
+                {
+                    Code = 200,
+                    Message = "获取成功",
+                    Data = sortedList
                 });
             }
 
-            var files = directoryInfo.GetFiles();
-            foreach (var file in files)
+            // 分页流式处理逻辑
+            IEnumerable<DirectoryInfo> dirQuery = directoryInfo.EnumerateDirectories();
+            IEnumerable<FileInfo> fileQuery = directoryInfo.EnumerateFiles();
+
+            if (!string.IsNullOrWhiteSpace(search))
             {
-                resultList.Add(new FileItem
-                {
-                    Name = file.Name,
-                    Type = "file",
-                    Size = file.Length,
-                    LastModified = file.LastWriteTime,
-                    Permission = GetUnixPermissionSafe(file)
-                });
+                dirQuery = dirQuery.Where(d => d.Name.Contains(search, StringComparison.OrdinalIgnoreCase));
+                fileQuery = fileQuery.Where(f => f.Name.Contains(search, StringComparison.OrdinalIgnoreCase));
             }
 
-            var sortedList = resultList
-                .OrderByDescending(x => x.Type == "folder") 
-                .ThenBy(x => x.Name) 
-                .ToList();
+            bool isDesc = string.Equals(order, "desc", StringComparison.OrdinalIgnoreCase);
 
-            return Ok(new ApiResponse<List<FileItem>>
+            if (string.Equals(sort, "time", StringComparison.OrdinalIgnoreCase))
+            {
+                dirQuery = isDesc ? dirQuery.OrderBy(d => d.LastWriteTime) : dirQuery.OrderByDescending(d => d.LastWriteTime);
+                fileQuery = isDesc ? fileQuery.OrderBy(f => f.LastWriteTime) : fileQuery.OrderByDescending(f => f.LastWriteTime);
+            }
+            else if (string.Equals(sort, "size", StringComparison.OrdinalIgnoreCase))
+            {
+                dirQuery = dirQuery.OrderBy(d => d.Name);
+                fileQuery = isDesc ? fileQuery.OrderBy(f => f.Length) : fileQuery.OrderByDescending(f => f.Length);
+            }
+            else
+            {
+                dirQuery = isDesc ? dirQuery.OrderByDescending(d => d.Name) : dirQuery.OrderBy(d => d.Name);
+                fileQuery = isDesc ? fileQuery.OrderByDescending(f => f.Name) : fileQuery.OrderBy(f => f.Name);
+            }
+
+            var dirList = dirQuery.ToList();
+            var fileList = fileQuery.ToList();
+            int totalCount = dirList.Count + fileList.Count;
+
+            if (page < 1) page = 1;
+            int skip = (page - 1) * pageSize;
+
+            var pagedItems = new List<FileItem>();
+
+            if (skip < dirList.Count)
+            {
+                var dirsToTake = dirList.Skip(skip).Take(pageSize).ToList();
+                foreach (var dir in dirsToTake)
+                {
+                    pagedItems.Add(new FileItem
+                    {
+                        Name = dir.Name,
+                        Type = "folder",
+                        Size = 0,
+                        LastModified = dir.LastWriteTime,
+                        Permission = GetUnixPermissionSafe(dir)
+                    });
+                }
+
+                int remaining = pageSize - dirsToTake.Count;
+                if (remaining > 0)
+                {
+                    var filesToTake = fileList.Take(remaining).ToList();
+                    foreach (var file in filesToTake)
+                    {
+                        pagedItems.Add(new FileItem
+                        {
+                            Name = file.Name,
+                            Type = "file",
+                            Size = file.Length,
+                            LastModified = file.LastWriteTime,
+                            Permission = GetUnixPermissionSafe(file)
+                        });
+                    }
+                }
+            }
+            else
+            {
+                int fileSkip = skip - dirList.Count;
+                var filesToTake = fileList.Skip(fileSkip).Take(pageSize).ToList();
+                foreach (var file in filesToTake)
+                {
+                    pagedItems.Add(new FileItem
+                    {
+                        Name = file.Name,
+                        Type = "file",
+                        Size = file.Length,
+                        LastModified = file.LastWriteTime,
+                        Permission = GetUnixPermissionSafe(file)
+                    });
+                }
+            }
+
+            return Ok(new ApiResponse<PagedFilesResult>
             {
                 Code = 200,
                 Message = "获取成功",
-                Data = sortedList
+                Data = new PagedFilesResult
+                {
+                    Total = totalCount,
+                    Items = pagedItems
+                }
             });
         }
         catch (UnauthorizedAccessException)

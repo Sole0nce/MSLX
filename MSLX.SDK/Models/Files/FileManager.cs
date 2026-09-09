@@ -11,6 +11,12 @@ public class FileItem
     public string Permission { get; set; } = ""; 
 }
 
+public class PagedFilesResult
+{
+    public int Total { get; set; }
+    public List<FileItem> Items { get; set; } = new();
+}
+
 public class SaveFileRequest
 {
     [Required(ErrorMessage = "文件路径 (Path) 不能为空")]

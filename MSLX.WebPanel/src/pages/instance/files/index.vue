@@ -69,6 +69,9 @@ const loading = ref(false);
 const fileList = ref<FilesListModel[]>([]);
 const currentPath = ref('');
 const selectedRowKeys = ref<string[]>([]);
+const currentPage = ref(1);
+const pageSize = ref(50);
+const totalCount = ref(0);
 const viewMode = ref<'list' | 'grid'>((localStorage.getItem('mslx_file_view_mode') as 'list' | 'grid') || 'list');
 const setViewMode = (mode: 'list' | 'grid') => {
   viewMode.value = mode;
@@ -220,8 +223,31 @@ const fetchData = async (targetPath = currentPath.value) => {
   loading.value = true;
   selectedRowKeys.value = [];
   try {
-    const res = await getInstanceFilesList(instanceId.value, targetPath);
-    fileList.value = res || [];
+    const res = await getInstanceFilesList(instanceId.value, {
+      path: targetPath,
+      page: currentPage.value,
+      pageSize: pageSize.value,
+      search: searchKey.value.trim() || undefined,
+      sort: sortType.value,
+    });
+
+    if (Array.isArray(res)) {
+      fileList.value = res || [];
+      totalCount.value = res.length;
+    } else if (res && Array.isArray((res as any).items)) {
+      fileList.value = (res as any).items || [];
+      totalCount.value = (res as any).total ?? (res as any).items.length;
+      const maxPage = Math.max(1, Math.ceil(totalCount.value / pageSize.value));
+      if (currentPage.value > maxPage) {
+        currentPage.value = maxPage;
+        await fetchData(targetPath);
+        return;
+      }
+    } else {
+      fileList.value = [];
+      totalCount.value = 0;
+    }
+
     currentPath.value = targetPath;
   } catch (error) {
     console.error(`请求路径 [${targetPath}] 失败:`, error);
@@ -672,34 +698,38 @@ const sortOptions = [
 
 // --- 计算属性 ---
 const filteredFileList = computed(() => {
-  let list = [...fileList.value]; // 浅拷贝
+  return fileList.value;
+});
 
-  // 搜索过滤
-  if (searchKey.value) {
-    const key = searchKey.value.toLowerCase();
-    list = list.filter((item) => item.name.toLowerCase().includes(key));
-  }
+const paginationConfig = computed(() => ({
+  current: currentPage.value,
+  pageSize: pageSize.value,
+  total: totalCount.value,
+  pageSizeOptions: [20, 50, 100],
+  layout: isMobile.value ? 'total, prev, pager, next' : 'total, size, prev, pager, next, jumper',
+  maxPageBtnNum: isMobile.value ? 3 : 5,
+  size: 'small' as const,
+}));
 
-  // 排序逻辑
-  list.sort((a, b) => {
-    // 文件夹置顶优先级最高
-    if (a.type === 'folder' && b.type !== 'folder') return -1;
-    if (a.type !== 'folder' && b.type === 'folder') return 1;
+const handlePageChange = (pageInfo: { current: number; pageSize: number }) => {
+  currentPage.value = pageInfo.current;
+  pageSize.value = pageInfo.pageSize;
+  selectedRowKeys.value = [];
+  fetchData();
+};
 
-    // 具体排序规则
-    switch (sortType.value) {
-      case 'name':
-        return a.name.localeCompare(b.name, 'zh-CN', { numeric: true });
-      case 'time':
-        return new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
-      case 'size':
-        return b.size - a.size;
-      default:
-        return 0;
-    }
-  });
+let searchDebounceTimer: any = null;
+watch(searchKey, () => {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    currentPage.value = 1;
+    fetchData();
+  }, 300);
+});
 
-  return list;
+watch(sortType, () => {
+  currentPage.value = 1;
+  fetchData();
 });
 
 // —————— 生命周期 ——————
@@ -714,6 +744,7 @@ watch(
     if (targetPath === currentPath.value && fileList.value.length > 0) return;
 
     try {
+      currentPage.value = 1;
       searchKey.value = '';
       await fetchData(targetPath);
     } catch (err: any) {
@@ -766,6 +797,8 @@ onBeforeRouteLeave((to, _from, next) => {
 watch(instanceId, async () => {
   if (route.name !== 'InstanceFiles') return;
   currentPath.value = '';
+  currentPage.value = 1;
+  searchKey.value = '';
   selectedRowKeys.value = [];
   try {
     await fetchData();
@@ -778,6 +811,10 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+  }
   window.removeEventListener('resize', handleResize);
 });
 </script>
@@ -810,6 +847,7 @@ onUnmounted(() => {
             placeholder="搜索文件..."
             class="!rounded-lg shadow-sm"
             :style="{ width: isMobile ? '120px' : '200px' }"
+            clearable
           >
             <template #prefix-icon><search-icon class="text-zinc-400" /></template>
           </t-input>
@@ -887,26 +925,36 @@ onUnmounted(() => {
         @drop.prevent="handleFileDrop"
       >
         <!-- 大图标网格视图 -->
-        <file-grid-view
-          v-if="viewMode === 'grid'"
-          v-model:selected-row-keys="selectedRowKeys"
-          :file-list="filteredFileList"
-          :instance-id="instanceId"
-          :current-path="currentPath"
-          :is-mobile="isMobile"
-          :has-permission-support="hasPermissionSupport"
-          :loading="loading"
-          @row-click="handleRowClick"
-          @open-editor="openEditor"
-          @open-preview="openPreview"
-          @open-video-preview="openVideoPreview"
-          @download="handleDownload"
-          @rename="handleOpenRename"
-          @delete="handleDelete"
-          @compress="handleCompress"
-          @decompress="handleOpenDecompress"
-          @permission="handleOpenPermission"
-        />
+        <div v-if="viewMode === 'grid'" class="flex flex-col flex-1 h-full overflow-y-auto">
+          <file-grid-view
+            v-model:selected-row-keys="selectedRowKeys"
+            :file-list="filteredFileList"
+            :instance-id="instanceId"
+            :current-path="currentPath"
+            :is-mobile="isMobile"
+            :has-permission-support="hasPermissionSupport"
+            :loading="loading"
+            @row-click="handleRowClick"
+            @open-editor="openEditor"
+            @open-preview="openPreview"
+            @open-video-preview="openVideoPreview"
+            @download="handleDownload"
+            @rename="handleOpenRename"
+            @delete="handleDelete"
+            @compress="handleCompress"
+            @decompress="handleOpenDecompress"
+            @permission="handleOpenPermission"
+          />
+          <div
+            v-if="totalCount > 0"
+            class="p-3 border-t border-zinc-200/60 dark:border-zinc-800 flex justify-end shrink-0"
+          >
+            <t-pagination
+              v-bind="paginationConfig"
+              @change="handlePageChange"
+            />
+          </div>
+        </div>
 
         <!-- 列表视图 -->
         <t-table
@@ -917,8 +965,11 @@ onUnmounted(() => {
           :row-key="'name'"
           :loading="loading"
           :hover="true"
+          :pagination="paginationConfig"
+          :disable-data-page="true"
           size="medium"
           class="custom-table"
+          @page-change="handlePageChange"
         >
           <template #name="{ row }">
             <div class="flex items-center py-1.5 cursor-pointer group" @click.stop="handleRowClick(row)">

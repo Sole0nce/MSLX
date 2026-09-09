@@ -2,6 +2,7 @@ import { request } from '@/utils/request';
 import { TOKEN_NAME, BASE_URL_NAME } from '@/config/global';
 import {
   FilesListModel,
+  FilesListResponse,
   HostDriveItem,
   HostFsResponse,
   PluginsAndModsListModel,
@@ -62,11 +63,21 @@ export async function checkPackageJarList(uploadId: string, localPath?: string) 
   });
 }
 
+export interface FileListParams {
+  path?: string;
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  sort?: string;
+  order?: 'asc' | 'desc';
+}
+
 // 文件管理系统
-export async function getInstanceFilesList(instanceId: number,path: string = ''){
-  return await request.get<FilesListModel[]>({
+export async function getInstanceFilesList(instanceId: number, params?: FileListParams | string) {
+  const queryParams = typeof params === 'string' ? { path: params } : (params || {});
+  return await request.get<FilesListResponse | FilesListModel[]>({
     url: `/api/files/instance/${instanceId}/lists`,
-    params: { path }
+    params: queryParams,
   });
 }
 
