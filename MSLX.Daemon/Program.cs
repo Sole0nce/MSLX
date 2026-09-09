@@ -216,6 +216,7 @@ builder.Services.AddSingleton<SystemMonitor>();
 builder.Services.AddSingleton<CreationTaskTracker>();
 builder.Services.AddSingleton<BackgroundTaskManager>();
 builder.Services.AddSingleton<IBackgroundTaskManager>(sp => sp.GetRequiredService<BackgroundTaskManager>());
+builder.Services.AddSingleton<ArchiveService>();
 // 插件的一些服务
 var pluginManager = new PluginManager();
 builder.Services.AddSingleton(pluginManager);

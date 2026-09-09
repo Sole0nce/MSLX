@@ -131,8 +131,8 @@ const isVideo = (name: string) => {
 };
 
 const isArchive = (name: string) => {
-  const ext = name.split('.').pop()?.toLowerCase();
-  return ['zip', 'jar'].includes(ext || '');
+  const lower = name.toLowerCase();
+  return /\.(zip|jar|rar|7z|tar|tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar\.zst|gz|xz|bz2)$/i.test(lower);
 };
 
 const getFileIcon = (row: FilesListModel) => {
@@ -149,7 +149,7 @@ const getFileIcon = (row: FilesListModel) => {
   if (['png', 'jpg', 'jpeg', 'gif', 'ico', 'webp'].includes(ext || ''))
     return { icon: FileImageIcon, color: 'var(--td-success-color)' };
   if (isVideo(row.name)) return { icon: VideoIcon, color: '#0052d9' };
-  if (['jar', 'zip', 'rar', '7z', 'tar', 'gz'].includes(ext || '')) return { icon: FileZipIcon, color: '#722ed1' };
+  if (isArchive(row.name)) return { icon: FileZipIcon, color: '#722ed1' };
   if (['yml', 'yaml', 'json', 'properties', 'toml', 'xml', 'conf', 'sh', 'bat', 'cmd'].includes(ext || ''))
     return { icon: CodeIcon, color: 'var(--td-warning-color)' };
   if (['log', 'txt', 'md', 'lock'].includes(ext || '')) return { icon: FilePasteIcon, color: 'var(--td-gray-color-6)' };
