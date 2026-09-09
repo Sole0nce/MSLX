@@ -1,7 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using CliWrap;
-using Microsoft.Extensions.Logging;
+using ICSharpCode.SharpZipLib.Zip;
 using SharpCompress.Archives;
 using SharpCompress.Common;
 using SharpCompress.Readers;
@@ -22,12 +22,23 @@ public class ArchiveService
 
     /// <summary>
     /// 解压归档文件，支持 .zip, .jar, .tar, .tar.gz, .tgz, .tar.xz, .txz, .tar.bz2, .tbz2, .7z, .rar 等
+    /// 可选传入 password 解密加密压缩包。
     /// </summary>
-    public async Task DecompressAsync(
+    public Task DecompressAsync(
         string archiveFullPath,
         string extractRootPath,
         string? encodingName,
         CancellationToken ct,
+        Action<int, string>? onProgress = null,
+        Func<string, bool>? isPathSafe = null)
+        => DecompressAsync(archiveFullPath, extractRootPath, encodingName, null, ct, onProgress, isPathSafe);
+
+    public async Task DecompressAsync(
+        string archiveFullPath,
+        string extractRootPath,
+        string? encodingName,
+        string? password = null,
+        CancellationToken ct = default,
         Action<int, string>? onProgress = null,
         Func<string, bool>? isPathSafe = null)
     {
@@ -44,43 +55,107 @@ public class ArchiveService
         var normalizedExtractRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(extractRootPath))
                                     + Path.DirectorySeparatorChar;
 
-        _logger.LogInformation("开始解压文件: {Archive} 到 {Destination}, 编码: {Encoding}", archiveFullPath, extractRootPath, encoding.EncodingName);
+        string passPrompt = string.IsNullOrEmpty(password) ? "无密码" : "带密码";
+        _logger.LogInformation("开始解压文件: {Archive} 到 {Destination}, 编码: {Encoding}, {PassPrompt}",
+            archiveFullPath, extractRootPath, encoding.EncodingName, passPrompt);
+
         onProgress?.Invoke(0, "正在分析归档结构...");
 
         var readerOptions = new ReaderOptions
         {
-            ArchiveEncoding = new ArchiveEncoding { Default = encoding }
+            ArchiveEncoding = new ArchiveEncoding { Default = encoding },
+            Password = string.IsNullOrWhiteSpace(password) ? null : password
         };
 
-        // 针对 .7z, .zip, .jar, .rar 等基于索引头/随机访问的格式，优先使用 ArchiveFactory
-        if (lowerName.EndsWith(".7z") || lowerName.EndsWith(".zip") || lowerName.EndsWith(".jar") || lowerName.EndsWith(".rar"))
-        {
-            try
-            {
-                await DecompressWithArchiveFactoryAsync(archiveFullPath, normalizedExtractRoot, readerOptions, ct, onProgress, isPathSafe);
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "ArchiveFactory 解压遇到异常，尝试回退处理: {Archive}", archiveFullPath);
-                if (lowerName.EndsWith(".zip") || lowerName.EndsWith(".jar"))
-                {
-                    await DecompressWithBclZipArchiveAsync(archiveFullPath, normalizedExtractRoot, encoding, ct, onProgress, isPathSafe);
-                    return;
-                }
-            }
-        }
-
-        // 针对 .tar, .tar.gz, .tgz, .tar.xz, .txz, .tar.bz2, .tbz2 等流式打包格式，使用 ReaderFactory
         try
         {
-            await DecompressWithReaderFactoryAsync(archiveFullPath, normalizedExtractRoot, readerOptions, ct, onProgress, isPathSafe);
+            // 针对 .7z, .zip, .jar, .rar 等基于索引头/随机访问的格式，优先使用 ArchiveFactory
+            if (lowerName.EndsWith(".7z") || lowerName.EndsWith(".zip") || lowerName.EndsWith(".jar") || lowerName.EndsWith(".rar"))
+            {
+                try
+                {
+                    await DecompressWithArchiveFactoryAsync(archiveFullPath, normalizedExtractRoot, readerOptions, ct, onProgress, isPathSafe);
+                    return;
+                }
+                catch (Exception ex) when (!IsPasswordRelatedException(ex, password))
+                {
+                    // 注意：BCL ZipArchive 绝对不支持解压密码。若已提供密码，绝不应回退到 BCL，避免产生误导性的 unsupported compression method 报错
+                    if (string.IsNullOrWhiteSpace(readerOptions.Password) && (lowerName.EndsWith(".zip") || lowerName.EndsWith(".jar")))
+                    {
+                        _logger.LogWarning(ex, "ArchiveFactory 解压遇到异常，尝试回退处理: {Archive}", archiveFullPath);
+                        await DecompressWithBclZipArchiveAsync(archiveFullPath, normalizedExtractRoot, encoding, ct, onProgress, isPathSafe);
+                        return;
+                    }
+
+                    throw;
+                }
+            }
+
+            // 针对 .tar, .tar.gz, .tgz, .tar.xz, .txz, .tar.bz2, .tbz2 等流式打包格式，使用 ReaderFactory
+            try
+            {
+                await DecompressWithReaderFactoryAsync(archiveFullPath, normalizedExtractRoot, readerOptions, ct, onProgress, isPathSafe);
+            }
+            catch (Exception ex) when (!IsPasswordRelatedException(ex, password))
+            {
+                _logger.LogWarning(ex, "ReaderFactory 解压遇到异常，尝试 ArchiveFactory 回退: {Archive}", archiveFullPath);
+                await DecompressWithArchiveFactoryAsync(archiveFullPath, normalizedExtractRoot, readerOptions, ct, onProgress, isPathSafe);
+            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (IsPasswordRelatedException(ex, password))
         {
-            _logger.LogWarning(ex, "ReaderFactory 解压遇到异常，尝试 ArchiveFactory 回退: {Archive}", archiveFullPath);
-            await DecompressWithArchiveFactoryAsync(archiveFullPath, normalizedExtractRoot, readerOptions, ct, onProgress, isPathSafe);
+            throw new InvalidOperationException("密码错误或当前文件已加密需要提供解压密码", ex);
         }
+    }
+
+    private static bool IsPasswordRelatedException(Exception? ex, string? password = null)
+    {
+        while (ex != null)
+        {
+            if (ex is System.Security.Cryptography.CryptographicException ||
+                ex is SharpCompress.Common.CryptographicException)
+            {
+                return true;
+            }
+
+            string msg = ex.Message.ToLowerInvariant();
+            if (msg.Contains("password") ||
+                msg.Contains("encrypt") ||
+                msg.Contains("crypt") ||
+                msg.Contains("密码") ||
+                msg.Contains("aes") ||
+                msg.Contains("verification") ||
+                msg.Contains("checksum") ||
+                msg.Contains("crc") ||
+                msg.Contains("bad key") ||
+                msg.Contains("invalid key") ||
+                msg.Contains("mac mismatch") ||
+                msg.Contains("unsupported compression method") ||
+                msg.Contains("compressed using an unsupported compression method"))
+            {
+                return true;
+            }
+
+            // 用户提供了密码，但 SharpCompress 报无法确定压缩流类型时，说明因密码错误导致格式探测/校验未通过
+            if (!string.IsNullOrWhiteSpace(password) &&
+                (ex is SharpCompress.Common.ArchiveOperationException || msg.Contains("cannot determine compressed stream type")))
+            {
+                return true;
+            }
+
+            if (ex is AggregateException agg)
+            {
+                foreach (var inner in agg.InnerExceptions)
+                {
+                    if (IsPasswordRelatedException(inner, password))
+                        return true;
+                }
+            }
+
+            ex = ex.InnerException;
+        }
+
+        return false;
     }
 
     private async Task DecompressWithArchiveFactoryAsync(
@@ -93,6 +168,13 @@ public class ArchiveService
     {
         using var archive = ArchiveFactory.OpenArchive(archiveFullPath, readerOptions);
         var entries = archive.Entries.ToList();
+
+        // 检查是否存在需要密码的加密条目，如果未提供密码则提前抛出明确提示
+        bool hasEncrypted = entries.Any(e => !e.IsDirectory && e.IsEncrypted);
+        if (hasEncrypted && string.IsNullOrWhiteSpace(readerOptions.Password))
+        {
+            throw new InvalidOperationException("当前压缩包已加密，请提供解压密码");
+        }
         int total = entries.Count;
         int current = 0;
         int lastReportedPercent = -1;
@@ -261,11 +343,20 @@ public class ArchiveService
 
     /// <summary>
     /// 压缩文件/文件夹，根据目标文件名后缀选择格式 (.zip, .tar, .tar.gz, .tgz, .tar.bz2, .tbz2, .7z)
+    /// 可选传入 password 设置密码保护（.zip 采用纯 C# AES-256，.7z 采用 7z CLI）。
     /// </summary>
-    public async Task CompressAsync(
+    public Task CompressAsync(
         Dictionary<string, string> filesToCompress,
         string targetFilePath,
         CancellationToken ct,
+        Action<int, string>? onProgress = null)
+        => CompressAsync(filesToCompress, targetFilePath, null, ct, onProgress);
+
+    public async Task CompressAsync(
+        Dictionary<string, string> filesToCompress,
+        string targetFilePath,
+        string? password = null,
+        CancellationToken ct = default,
         Action<int, string>? onProgress = null)
     {
         if (filesToCompress == null || filesToCompress.Count == 0)
@@ -279,10 +370,20 @@ public class ArchiveService
             File.Delete(targetFilePath);
 
         string lowerTarget = Path.GetFileName(targetFilePath).ToLowerInvariant();
+        bool hasPassword = !string.IsNullOrWhiteSpace(password);
+
+        // Tar 家族不支持包内密码
+        if (hasPassword && (lowerTarget.EndsWith(".tar.gz") || lowerTarget.EndsWith(".tgz") ||
+                            lowerTarget.EndsWith(".tar.bz2") || lowerTarget.EndsWith(".tbz2") ||
+                            lowerTarget.EndsWith(".tar.xz") || lowerTarget.EndsWith(".txz") ||
+                            lowerTarget.EndsWith(".tar")))
+        {
+            throw new NotSupportedException("tar 类打包格式在标准中不支持原生密码保护，请选用 .zip 或 .7z 格式进行加密。");
+        }
 
         if (lowerTarget.EndsWith(".7z"))
         {
-            await Compress7zAsync(filesToCompress, targetFilePath, ct, onProgress);
+            await Compress7zAsync(filesToCompress, targetFilePath, password, ct, onProgress);
             return;
         }
 
@@ -305,7 +406,16 @@ public class ArchiveService
         }
 
         // 默认作为 .zip 处理
-        await CompressZipAsync(filesToCompress, targetFilePath, ct, onProgress);
+        if (hasPassword)
+        {
+            // 纯 C# AES-256 加密 ZIP (通过 SharpZipLib)
+            await CompressZipEncryptedAsync(filesToCompress, targetFilePath, password!, ct, onProgress);
+        }
+        else
+        {
+            // 普通标准 ZIP
+            await CompressZipAsync(filesToCompress, targetFilePath, ct, onProgress);
+        }
     }
 
     private async Task CompressZipAsync(
@@ -335,6 +445,54 @@ public class ArchiveService
 
             archive.CreateEntryFromFile(sourcePath, entryName, CompressionLevel.Optimal);
         }
+    }
+
+    /// <summary>
+    /// 加密 ZIP 压缩
+    /// </summary>
+    private async Task CompressZipEncryptedAsync(
+        Dictionary<string, string> filesToCompress,
+        string targetFilePath,
+        string password,
+        CancellationToken ct,
+        Action<int, string>? onProgress)
+    {
+        int total = filesToCompress.Count;
+        int current = 0;
+
+        await using var fileStream = new FileStream(targetFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+        using var zipStream = new ZipOutputStream(fileStream);
+        zipStream.Password = password;
+        zipStream.SetLevel(6); // 默认最优平衡压缩级别
+
+        foreach (var kvp in filesToCompress)
+        {
+            ct.ThrowIfCancellationRequested();
+            string sourcePath = kvp.Key;
+            string entryName = ZipEntry.CleanName(kvp.Value);
+
+            current++;
+            if (current % 5 == 0 || current == total)
+            {
+                int percent = (int)((double)current / total * 100);
+                onProgress?.Invoke(percent, $"正在加密压缩: {entryName}");
+            }
+
+            var entry = new ZipEntry(entryName)
+            {
+                DateTime = File.GetLastWriteTime(sourcePath),
+                Size = new FileInfo(sourcePath).Length,
+                AESKeySize = 256 // AES-256加密
+            };
+
+            zipStream.PutNextEntry(entry);
+            await using var sourceStream = File.OpenRead(sourcePath);
+            await sourceStream.CopyToAsync(zipStream, ct);
+            zipStream.CloseEntry();
+        }
+
+        zipStream.IsStreamOwner = false;
+        zipStream.Finish();
     }
 
     private async Task CompressTarAsync(
@@ -430,6 +588,7 @@ public class ArchiveService
     private async Task Compress7zAsync(
         Dictionary<string, string> filesToCompress,
         string targetFilePath,
+        string? password,
         CancellationToken ct,
         Action<int, string>? onProgress)
     {
@@ -442,16 +601,23 @@ public class ArchiveService
 
         onProgress?.Invoke(10, "正在调用 7z 引擎压缩...");
 
-        // 收集所有需要压缩的源文件路径
+        // 收集所有需要压缩的源文件路径，写入列表文件以防命令行参数溢出
         string listFile = Path.Combine(Path.GetTempPath(), $"7z_{Guid.NewGuid():N}.txt");
         try
         {
             var lines = filesToCompress.Keys.Distinct().ToList();
             await File.WriteAllLinesAsync(listFile, lines, Encoding.UTF8, ct);
 
-            var cmd = Cli.Wrap(sevenZipExe)
-                .WithArguments(new[] { "a", "-t7z", "-mx=7", targetFilePath, $"@{listFile}" });
+            var args = new List<string> { "a", "-t7z", "-mx=7" };
+            if (!string.IsNullOrWhiteSpace(password))
+            {
+                args.Add($"-p{password}");
+                args.Add("-mhe=on"); // 加密文件名
+            }
+            args.Add(targetFilePath);
+            args.Add($"@{listFile}");
 
+            var cmd = Cli.Wrap(sevenZipExe).WithArguments(args);
             var result = await cmd.ExecuteAsync(ct);
             if (result.ExitCode != 0)
             {

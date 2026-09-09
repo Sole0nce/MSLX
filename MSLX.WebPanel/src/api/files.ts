@@ -177,10 +177,10 @@ export function getFileThumbnailUrl(instanceId: number, path: string, size = 256
   return url.toString();
 }
 
-export function startCompress(instanceId: number, sources: string[], targetName: string, currentPath: string) {
+export function startCompress(instanceId: number, sources: string[], targetName: string, currentPath: string, password?: string) {
   return request.post({
     url: `/api/files/instance/${instanceId}/compress`,
-    data: { sources, targetName, currentPath }
+    data: { sources, targetName, currentPath, password: password || undefined }
   });
 }
 
@@ -190,10 +190,10 @@ export function getCompressStatus(taskId: string) {
   });
 }
 
-export function startDecompress(instanceId: number, fileName: string, currentPath: string,encoding = 'utf-8',createSubFolder: boolean =  true) {
+export function startDecompress(instanceId: number, fileName: string, currentPath: string, encoding = 'utf-8', createSubFolder: boolean = true, password?: string) {
   return request.post({
     url: `/api/files/instance/${instanceId}/decompress`,
-    data: {  fileName, currentPath,encoding,createSubFolder }
+    data: { fileName, currentPath, encoding, createSubFolder, password: password || undefined }
   });
 }
 

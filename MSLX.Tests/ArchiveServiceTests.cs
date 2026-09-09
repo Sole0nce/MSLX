@@ -120,4 +120,68 @@ public class ArchiveServiceTests : IDisposable
         Assert.True(File.Exists(Path.Combine(extractDir, "valid.txt")));
         Assert.False(File.Exists(Path.Combine(_tempDir, "evil.txt")), "Zip Slip 穿透文件不应被解压到解压目录之外");
     }
+
+    [Fact]
+    public async Task CompressAndDecompress_EncryptedZip_Success()
+    {
+        string srcDir = Path.Combine(_tempDir, "enc_source");
+        Directory.CreateDirectory(srcDir);
+
+        string secretFile = Path.Combine(srcDir, "secret.txt");
+        await File.WriteAllTextAsync(secretFile, "Very confidential server secret!", Encoding.UTF8);
+
+        var filesToCompress = new Dictionary<string, string>
+        {
+            [secretFile] = "secret.txt"
+        };
+
+        string encZipPath = Path.Combine(_tempDir, "encrypted.zip");
+        string password = "StrongPassword@2026";
+
+        // 1. 纯 C# AES-256 加密压缩
+        await _archiveService.CompressAsync(filesToCompress, encZipPath, password, CancellationToken.None);
+        Assert.True(File.Exists(encZipPath));
+
+        // 2. 无密码解压应明确提示需要密码
+        string extractDirNoPass = Path.Combine(_tempDir, "extract_no_pass");
+        var noPassEx = await Assert.ThrowsAnyAsync<Exception>(async () =>
+        {
+            await _archiveService.DecompressAsync(encZipPath, extractDirNoPass, "utf-8", null, CancellationToken.None);
+        });
+        Assert.Contains("加密", noPassEx.Message);
+
+        // 3. 错误密码解压应明确提示密码错误
+        string extractDirWrongPass = Path.Combine(_tempDir, "extract_wrong_pass");
+        var wrongPassEx = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await _archiveService.DecompressAsync(encZipPath, extractDirWrongPass, "utf-8", "WrongPass123", CancellationToken.None);
+        });
+        Assert.Contains("密码错误或当前文件已加密", wrongPassEx.Message);
+
+        // 4. 正确密码解压成功
+        string extractDirCorrect = Path.Combine(_tempDir, "extract_correct");
+        await _archiveService.DecompressAsync(encZipPath, extractDirCorrect, "utf-8", password, CancellationToken.None);
+
+        string extractedSecret = Path.Combine(extractDirCorrect, "secret.txt");
+        Assert.True(File.Exists(extractedSecret));
+        string content = await File.ReadAllTextAsync(extractedSecret, Encoding.UTF8);
+        Assert.Equal("Very confidential server secret!", content);
+    }
+
+    [Fact]
+    public async Task Compress_TarWithPassword_ThrowsNotSupportedException()
+    {
+        string srcDir = Path.Combine(_tempDir, "tar_source");
+        Directory.CreateDirectory(srcDir);
+        string dummy = Path.Combine(srcDir, "dummy.txt");
+        await File.WriteAllTextAsync(dummy, "test", Encoding.UTF8);
+
+        var files = new Dictionary<string, string> { [dummy] = "dummy.txt" };
+        string tarPath = Path.Combine(_tempDir, "test.tar.gz");
+
+        await Assert.ThrowsAsync<NotSupportedException>(async () =>
+        {
+            await _archiveService.CompressAsync(files, tarPath, "password123", CancellationToken.None);
+        });
+    }
 }

@@ -131,6 +131,7 @@ public class CompressController : ControllerBase
             await _archiveService.CompressAsync(
                 filesToCompress,
                 targetFilePath,
+                request.Password,
                 ct,
                 (percent, msg) =>
                 {
@@ -236,6 +237,7 @@ public class CompressController : ControllerBase
                 zipFullPath,
                 extractRootPath,
                 request.Encoding,
+                request.Password,
                 ct,
                 onProgress: (percent, msg) =>
                 {
@@ -249,7 +251,8 @@ public class CompressController : ControllerBase
         }
         catch (Exception ex)
         {
-            UpdateStatus2(taskId, $"Task_Decompress_{taskId}", "error", 0, $"解压失败: {ex.Message}");
+            string errorMsg = ex.Message.StartsWith("解压失败") ? ex.Message : $"解压失败: {ex.Message}";
+            UpdateStatus2(taskId, $"Task_Decompress_{taskId}", "error", 0, errorMsg);
         }
     }
 

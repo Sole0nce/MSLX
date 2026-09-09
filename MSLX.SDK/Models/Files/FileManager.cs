@@ -63,6 +63,8 @@ public class CompressRequest
     public string TargetName { get; set; } = string.Empty; 
 
     public string CurrentPath { get; set; } = string.Empty;
+
+    public string? Password { get; set; }
 }
 
 public class DecompressRequest
@@ -76,6 +78,8 @@ public class DecompressRequest
     public string Encoding { get; set; } = "auto";
 
     public bool CreateSubFolder { get; set; } = false;
+
+    public string? Password { get; set; }
 }
 
 public class ChmodRequest
