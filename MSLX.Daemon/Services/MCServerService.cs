@@ -7,6 +7,7 @@ using MSLX.Daemon.Utils.ConfigUtils;
 using MSLX.SDK.IServices;
 using MSLX.SDK.Models;
 using Newtonsoft.Json.Linq;
+using Porta.Pty;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
@@ -31,7 +32,11 @@ public class MCServerService : IMCServerService
     public class ServerContext
     {
         public Process? Process { get; set; }
+        public IPtyConnection? PtyConnection { get; set; }
+        public bool IsPtyMode { get; set; } = false;
+        public CancellationTokenSource? PtyReadCts { get; set; }
         public ConcurrentQueue<string> Logs { get; set; } = new();
+        public ConcurrentQueue<string> PtyHistory { get; set; } = new();
         public bool IsInitializing { get; set; } = false;
         public volatile bool IsStopping = false;
         public volatile bool IsBackuping = false;
@@ -762,9 +767,13 @@ public class MCServerService : IMCServerService
             }
             else
             {
+                string terminalColorAndJline = serverInfo.EnablePty
+                    ? " -Dterminal.ansi=true"
+                    : (serverInfo.AllowOriginASCIIColors ? " -Dterminal.jline=false -Dterminal.ansi=true" : "");
+
                 // 主机直接启动
                 args =
-                    $"{authJvm} -Xms{serverInfo.MinM}M -Xmx{serverInfo.MaxM}M {serverInfo.Args}{(serverInfo.ForceJvmUTF8 ? " -Dfile.encoding=UTF-8" : "")}{(serverInfo.AllowOriginASCIIColors ? " -Dterminal.jline=false -Dterminal.ansi=true" : "")} -jar {serverInfo.Core} nogui";
+                    $"{authJvm} -Xms{serverInfo.MinM}M -Xmx{serverInfo.MaxM}M {serverInfo.Args}{(serverInfo.ForceJvmUTF8 ? " -Dfile.encoding=UTF-8" : "")}{terminalColorAndJline} -jar {serverInfo.Core} nogui";
                 exec = serverInfo.Java;
 
                 // 处理自定义模式参数
@@ -794,7 +803,7 @@ public class MCServerService : IMCServerService
                 if (serverInfo.Core.Contains("@libraries"))
                 {
                     args =
-                        $"{authJvm} -Xms{serverInfo.MinM}M -Xmx{serverInfo.MaxM}M {serverInfo.Args}{(serverInfo.ForceJvmUTF8 ? " -Dfile.encoding=UTF-8" : "")}{(serverInfo.AllowOriginASCIIColors ? " -Dterminal.jline=false -Dterminal.ansi=true" : "")} {serverInfo.Core} nogui";
+                        $"{authJvm} -Xms{serverInfo.MinM}M -Xmx{serverInfo.MaxM}M {serverInfo.Args}{(serverInfo.ForceJvmUTF8 ? " -Dfile.encoding=UTF-8" : "")}{terminalColorAndJline} {serverInfo.Core} nogui";
                 }
             }
 
@@ -937,17 +946,155 @@ public class MCServerService : IMCServerService
             }
 
             // 启动进程
-            if (process.Start())
+            bool started = false;
+
+            if (serverInfo.EnablePty)
             {
-                ProcessTracker.Track(process, false);
-                context.Process = process;
-                context.IsInitializing = false; // 初始化完成
+                // PTY 仿真终端启动流程
+                try
+                {
+                    var envDict = new Dictionary<string, string>();
+                    foreach (System.Collections.DictionaryEntry de in startInfo.EnvironmentVariables)
+                    {
+                        if (de.Key != null && de.Value != null)
+                        {
+                            envDict[de.Key.ToString()!] = de.Value.ToString()!;
+                        }
+                    }
+                    if (!envDict.ContainsKey("TERM")) envDict["TERM"] = "xterm-256color";
+                    if (!envDict.ContainsKey("COLORTERM")) envDict["COLORTERM"] = "truecolor";
+                    if (!envDict.ContainsKey("FORCE_COLOR")) envDict["FORCE_COLOR"] = "1";
+                    var hostLang = Environment.GetEnvironmentVariable("LANG");
+                    if (!envDict.ContainsKey("LANG")) envDict["LANG"] = !string.IsNullOrWhiteSpace(hostLang) ? hostLang : "zh_CN.UTF-8";
+                    if (!envDict.ContainsKey("LC_ALL")) envDict["LC_ALL"] = envDict["LANG"];
 
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
+                    var ptyOptions = new PtyOptions
+                    {
+                        Name = $"MSLX-{instanceId}",
+                        Cols = 120,
+                        Rows = 30,
+                        Cwd = serverInfo.Base,
+                        App = exec,
+                        CommandLine = SplitCommandLineArgs(args),
+                        Environment = envDict
+                    };
 
-                _logger.LogInformation($"服务器 [{instanceId}] 启动成功，PID: {process.Id}");
-                RecordLog(instanceId, context, $"[MSLX] 服务器进程已启动，PID: {process.Id}");
+                    IPtyConnection ptyConnection = await PtyProvider.SpawnAsync(ptyOptions, CancellationToken.None);
+                    context.PtyConnection = ptyConnection;
+                    context.IsPtyMode = true;
+
+                    try
+                    {
+                        context.Process = Process.GetProcessById(ptyConnection.Pid);
+                        ProcessTracker.Track(context.Process, false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning($"[PTY] 无法获取或跟踪进程 PID {ptyConnection.Pid}: {ex.Message}");
+                    }
+
+                    context.IsInitializing = false;
+
+                    ptyConnection.ProcessExited += (sender, e) =>
+                    {
+                        lock (context.StateLock)
+                        {
+                            context.IsProcessExited = true;
+                            context.FinalExitCode = ptyConnection.ExitCode;
+                        }
+                        CheckAndHandleTrueExit(instanceId, context);
+                    };
+
+                    var ptyCts = new CancellationTokenSource();
+                    context.PtyReadCts = ptyCts;
+
+                    _ = Task.Run(async () =>
+                    {
+                        byte[] buffer = new byte[4096];
+                        char[] chars = new char[4096];
+                        var decoder = Encoding.UTF8.GetDecoder();
+                        var lineSb = new StringBuilder();
+                        try
+                        {
+                            while (!ptyCts.Token.IsCancellationRequested)
+                            {
+                                int read = await ptyConnection.ReaderStream.ReadAsync(buffer, 0, buffer.Length, ptyCts.Token);
+                                if (read <= 0) break;
+
+                                string rawChunk = Encoding.UTF8.GetString(buffer, 0, read);
+                                context.PtyHistory.Enqueue(rawChunk);
+                                while (context.PtyHistory.Count > 100) context.PtyHistory.TryDequeue(out _);
+                                await _hubContext.Clients.Group("pty_" + instanceId).SendAsync("ReceivePtyData", rawChunk);
+
+                                int charCount = decoder.GetChars(buffer, 0, read, chars, 0, false);
+                                for (int i = 0; i < charCount; i++)
+                                {
+                                    char c = chars[i];
+                                    if (c == '\n')
+                                    {
+                                        string line = lineSb.ToString().TrimEnd('\r');
+                                        lineSb.Clear();
+                                        RecordLog(instanceId, context, line);
+                                    }
+                                    else
+                                    {
+                                        lineSb.Append(c);
+                                    }
+                                }
+                            }
+                        }
+                        catch (OperationCanceledException) { }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning($"[PTY] 读取输出异常: {ex.Message}");
+                        }
+                        finally
+                        {
+                            if (lineSb.Length > 0)
+                            {
+                                RecordLog(instanceId, context, lineSb.ToString().TrimEnd('\r'));
+                            }
+                            lock (context.StateLock)
+                            {
+                                context.IsStdoutClosed = true;
+                                context.IsStderrClosed = true;
+                            }
+                            CheckAndHandleTrueExit(instanceId, context);
+                        }
+                    });
+
+                    _logger.LogInformation($"服务器 [{instanceId}] 以 PTY 模式启动成功，PID: {ptyConnection.Pid}");
+                    RecordLog(instanceId, context, $"[MSLX] 服务器进程已通过 PTY 启动，PID: {ptyConnection.Pid}");
+                    started = true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"[PTY] 启动 PTY 失败，将回退到标准流模式: {ex.Message}");
+                    RecordLog(instanceId, context, $">>> [MSLX] 启动 PTY 失败 ({ex.Message})，正在回退到标准流模式...");
+                    context.IsPtyMode = false;
+                    context.PtyConnection = null;
+                }
+            }
+
+            if (!started)
+            {
+                if (process.Start())
+                {
+                    ProcessTracker.Track(process, false);
+                    context.Process = process;
+                    context.IsInitializing = false; // 初始化完成
+
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    _logger.LogInformation($"服务器 [{instanceId}] 启动成功，PID: {process.Id}");
+                    RecordLog(instanceId, context, $"[MSLX] 服务器进程已启动，PID: {process.Id}");
+                    started = true;
+                }
+            }
+
+            if (started)
+            {
 
                 // 联动启动隧道
                 if (!string.IsNullOrWhiteSpace(serverInfo.BindFrpId))
@@ -1076,8 +1223,9 @@ public class MCServerService : IMCServerService
                                     {
                                         // MC服务器：发送 stop / 自定义 命令
                                         string stopCmd = string.IsNullOrEmpty(server?.StopCommand) ? "stop" : server.StopCommand;
-                                        RecordLog(instanceId, context, $">>> [MSLX-Daemon] 准备执行停止指令...");
+                                        RecordLog(instanceId, context, $">>> [MSLX-Daemon] 准备执行停止指令: {stopCmd}");
                                         SendCommand(instanceId, stopCmd, true);
+                                        RecordLog(instanceId, context, "[MSLX] 已发送关闭指令，正在等待服务退出...");
                                     }
                                     else
                                     {
@@ -1085,13 +1233,16 @@ public class MCServerService : IMCServerService
                                         if (string.IsNullOrEmpty(server?.StopCommand ?? "") ||
                                             (server?.StopCommand ?? "") == "^c")
                                         {
+                                            RecordLog(instanceId, context, ">>> [MSLX-Daemon] 准备发送中断信号 (^C)...");
                                             ProcessHelper.SendCtrlC(context.Process);
+                                            RecordLog(instanceId, context, "[MSLX] 已发送中断信号，正在等待服务退出...");
                                         }
                                         else
                                         {
                                             string stopCmd = server?.StopCommand ?? "stop";
-                                            RecordLog(instanceId, context, $">>> [MSLX-Daemon] 准备执行停止指令...");
+                                            RecordLog(instanceId, context, $">>> [MSLX-Daemon] 准备执行停止指令: {stopCmd}");
                                             SendCommand(instanceId, stopCmd, true);
+                                            RecordLog(instanceId, context, "[MSLX] 已发送关闭指令，正在等待服务退出...");
                                         }
 
                                         // 关闭输入流
@@ -1120,10 +1271,6 @@ public class MCServerService : IMCServerService
                                         context.Process.Kill(true);
                                         RecordLog(instanceId, context, "[MSLX] 服务器超时，已强制结束进程树");
                                         _logger.LogWarning($"服务器实例 {instanceId} 关闭超时，已强制结束进程树");
-                                    }
-                                    else
-                                    {
-                                        RecordLog(instanceId, context, "[MSLX] 已发送关闭指令，正在等待流关闭...");
                                     }
                                 }
                             }
@@ -1199,6 +1346,12 @@ public class MCServerService : IMCServerService
                         UseShellExecute = false
                     })?.WaitForExit(3000);
                 }
+
+                if (context.PtyConnection != null)
+                {
+                    try { context.PtyConnection.Kill(); } catch { }
+                }
+                context.PtyReadCts?.Cancel();
 
                 if (context.Process != null && !context.Process.HasExited)
                 {
@@ -1377,8 +1530,17 @@ public class MCServerService : IMCServerService
 
                     if (!sentViaRcon)
                     {
-                        context.Process.StandardInput.WriteLine(command);
-                        context.Process.StandardInput.Flush();
+                        if (context.IsPtyMode && context.PtyConnection != null)
+                        {
+                            byte[] ptyBytes = Encoding.UTF8.GetBytes(command + "\r\n");
+                            context.PtyConnection.WriterStream.Write(ptyBytes, 0, ptyBytes.Length);
+                            context.PtyConnection.WriterStream.Flush();
+                        }
+                        else if (context.Process != null)
+                        {
+                            context.Process.StandardInput.WriteLine(command);
+                            context.Process.StandardInput.Flush();
+                        }
                     }
                     if (repeatCommandToLog) RecordLog(instanceId, context, $"[MSLX-Daemon] 已发送命令{(sentViaRcon ? "(RCON)" : "")}: {command}");
                     return true;
@@ -1395,6 +1557,121 @@ public class MCServerService : IMCServerService
     }
 
     /// <summary>
+    /// 发送原始 PTY 输入字节流
+    /// </summary>
+    public bool SendPtyInput(uint instanceId, byte[] data)
+    {
+        if (_activeServers.TryGetValue(instanceId, out var context))
+        {
+            if (context.IsPtyMode && context.PtyConnection != null)
+            {
+                try
+                {
+                    context.PtyConnection.WriterStream.Write(data, 0, data.Length);
+                    context.PtyConnection.WriterStream.Flush();
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"[PTY] 写入输入数据失败: {ex.Message}");
+                    return false;
+                }
+            }
+            else if (context.Process != null && !context.Process.HasExited)
+            {
+                try
+                {
+                    string str = Encoding.UTF8.GetString(data);
+                    if (str.Contains('\r') || str.Contains('\n'))
+                    {
+                        var lines = str.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var line in lines)
+                        {
+                            context.Process.StandardInput.WriteLine(line);
+                        }
+                        context.Process.StandardInput.Flush();
+                    }
+                    return true;
+                }
+                catch { return false; }
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 调整 PTY 伪终端行列尺寸
+    /// </summary>
+    public bool ResizePty(uint instanceId, int cols, int rows)
+    {
+        if (_activeServers.TryGetValue(instanceId, out var context))
+        {
+            if (context.IsPtyMode && context.PtyConnection != null)
+            {
+                try
+                {
+                    context.PtyConnection.Resize(cols, rows);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"[PTY] 调整终端尺寸失败: {ex.Message}");
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 检查实例是否处于 PTY 模式
+    /// </summary>
+    public bool IsServerPtyMode(uint instanceId)
+    {
+        if (_activeServers.TryGetValue(instanceId, out var context))
+        {
+            return context.IsPtyMode && context.PtyConnection != null;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 辅助工具：解析命令行字符串为参数列表
+    /// </summary>
+    private static string[] SplitCommandLineArgs(string? commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine)) return Array.Empty<string>();
+        var args = new List<string>();
+        var current = new StringBuilder();
+        bool inQuotes = false;
+        for (int i = 0; i < commandLine.Length; i++)
+        {
+            char c = commandLine[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (char.IsWhiteSpace(c) && !inQuotes)
+            {
+                if (current.Length > 0)
+                {
+                    args.Add(current.ToString());
+                    current.Clear();
+                }
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+        if (current.Length > 0)
+        {
+            args.Add(current.ToString());
+        }
+        return args.ToArray();
+    }
+
+    /// <summary>
     /// 获取服务器日志
     /// </summary>
     public List<string> GetLogs(uint instanceId)
@@ -1402,6 +1679,19 @@ public class MCServerService : IMCServerService
         if (_activeServers.TryGetValue(instanceId, out var context))
         {
             return context.Logs.ToList();
+        }
+
+        return new List<string>();
+    }
+
+    /// <summary>
+    /// 获取 PTY 历史缓冲数据块
+    /// </summary>
+    public List<string> GetPtyHistory(uint instanceId)
+    {
+        if (_activeServers.TryGetValue(instanceId, out var context))
+        {
+            return context.PtyHistory.ToList();
         }
 
         return new List<string>();
@@ -1535,6 +1825,7 @@ public class MCServerService : IMCServerService
         if (context.IsStopping)
         {
             _activeServers.TryRemove(instanceId, out _);
+            _hubContext.Clients.Group("pty_" + instanceId).SendAsync("PtyStatus", new { isPty = context.IsPtyMode, isRunning = false });
             RecordLog(instanceId, context, "[MSLX] 服务器已停止 (用户操作)。");
             return;
         }
@@ -1542,6 +1833,7 @@ public class MCServerService : IMCServerService
         // 不是从控制台停止的
         if (_activeServers.TryRemove(instanceId, out var removedContext))
         {
+            _hubContext.Clients.Group("pty_" + instanceId).SendAsync("PtyStatus", new { isPty = removedContext.IsPtyMode, isRunning = false });
             string exitMsg = $"[MSLX] 服务器进程已停止，退出代码: {exitCode}";
             exitMsg += exitCode != 0 ? " (异常退出)" : " (正常关闭)";
             RecordLog(instanceId, removedContext, exitMsg);
