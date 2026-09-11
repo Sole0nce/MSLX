@@ -1305,6 +1305,13 @@ public class MCServerService : IMCServerService
                                         RecordLog(instanceId, context, "[MSLX] 服务器超时，已强制结束进程树");
                                         _logger.LogWarning($"服务器实例 {instanceId} 关闭超时，已强制结束进程树");
                                     }
+
+                                    lock (context.StateLock)
+                                    {
+                                        context.IsProcessExited = true;
+                                        try { context.FinalExitCode = context.Process.ExitCode; } catch { }
+                                    }
+                                    CheckAndHandleTrueExit(instanceId, context);
                                 }
                             }
                             catch (Exception ex)
@@ -1331,16 +1338,20 @@ public class MCServerService : IMCServerService
 
                                 RecordLog(instanceId, context, $"[MSLX] 停止过程出错，已强制结束: {ex.Message}");
                                 _logger.LogWarning($"服务器实例 {instanceId} 停止过程出错，已强制结束: {ex.Message}");
+
+                                lock (context.StateLock)
+                                {
+                                    context.IsProcessExited = true;
+                                    try { context.FinalExitCode = context.Process.ExitCode; } catch { }
+                                }
+                                CheckAndHandleTrueExit(instanceId, context);
                             }
                         }
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, $"停止服务器 [{instanceId}] 后台任务异常");
-                    }
-                    finally
-                    {
-                        _activeServers.TryRemove(instanceId, out _);
+                        CheckAndHandleTrueExit(instanceId, context);
                     }
                 });
 
@@ -1858,9 +1869,9 @@ public class MCServerService : IMCServerService
     }
 
     // 监听服务器退出 执行崩溃重启等内容
-    private void HandleServerExit(uint instanceId, int exitCode)
+    private void HandleServerExit(uint instanceId, ServerContext context, int exitCode)
     {
-        if (!_activeServers.TryGetValue(instanceId, out var context)) return;
+        _activeServers.TryRemove(instanceId, out _);
 
         try
         {
@@ -1887,27 +1898,29 @@ public class MCServerService : IMCServerService
         context.OnlinePlayers.Clear();
         _hubContext.Clients.Group(instanceId.ToString()).SendAsync("PlayerListCleared", instanceId);
 
-        // 用户手动停止
+        _hubContext.Clients.Group("pty_" + instanceId).SendAsync("PtyStatus", new { isPty = context.IsPtyMode, isRunning = false });
+
+        string exitMsg = $"[MSLX] 服务器进程已停止，退出代码: {exitCode}";
         if (context.IsStopping)
         {
-            _activeServers.TryRemove(instanceId, out _);
-            _hubContext.Clients.Group("pty_" + instanceId).SendAsync("PtyStatus", new { isPty = context.IsPtyMode, isRunning = false });
-            RecordLog(instanceId, context, "[MSLX] 服务器已停止 (用户操作)。");
+            exitMsg += " (用户操作)";
+        }
+        else
+        {
+            exitMsg += exitCode != 0 ? " (异常退出)" : " (正常关闭)";
+        }
+        RecordLog(instanceId, context, exitMsg);
+
+        _logger.LogInformation($"MC 服务器 [{instanceId}] 停止处理完成 (Code: {exitCode})");
+
+        // 用户主动停止，不触发崩溃自启
+        if (context.IsStopping)
+        {
             return;
         }
 
-        // 不是从控制台停止的
-        if (_activeServers.TryRemove(instanceId, out var removedContext))
-        {
-            _hubContext.Clients.Group("pty_" + instanceId).SendAsync("PtyStatus", new { isPty = removedContext.IsPtyMode, isRunning = false });
-            string exitMsg = $"[MSLX] 服务器进程已停止，退出代码: {exitCode}";
-            exitMsg += exitCode != 0 ? " (异常退出)" : " (正常关闭)";
-            RecordLog(instanceId, removedContext, exitMsg);
-
-            _logger.LogInformation($"MC 服务器 [{instanceId}] 停止处理完成 (Code: {exitCode})");
-
-            // 自动重启
-            try
+        // 自动重启
+        try
             {
                 var serverInfo = IConfigBase.ServerList.GetServer(instanceId);
 
@@ -1928,11 +1941,11 @@ public class MCServerService : IMCServerService
                         // 检查剩余的记录数量是否超过阈值
                         if (history.Count > MaxCrashCount)
                         {
-                            RecordLog(instanceId, removedContext,
+                            RecordLog(instanceId, context,
                                 $">>> [MSLX] 严重错误：服务器在 {CrashCheckWindowSeconds} 秒内已崩溃 {history.Count} 次！");
-                            RecordLog(instanceId, removedContext,
+                            RecordLog(instanceId, context,
                                 ">>> [MSLX] 为防止无限重启导致系统卡死，守护进程已放弃自动重启该实例。");
-                            RecordLog(instanceId, removedContext,
+                            RecordLog(instanceId, context,
                                 ">>> [MSLX] 请检查服务器配置、Java环境或日志文件，修复问题后请手动启动。");
 
                             _logger.LogError($"实例 {instanceId} 触发重启熔断保护，停止重启。");
@@ -1941,7 +1954,7 @@ public class MCServerService : IMCServerService
                             return;
                         }
 
-                        RecordLog(instanceId, removedContext,
+                        RecordLog(instanceId, context,
                             $">>> [MSLX] 检测到异常退出，正在准备第 {history.Count} 次尝试重启 (阈值: {MaxCrashCount}次/5分钟)...");
                     }
 
@@ -1967,7 +1980,6 @@ public class MCServerService : IMCServerService
             {
                 _logger.LogError(ex, $"[AutoRestart] 自动重启逻辑出错");
             }
-        }
     }
 
     /// <summary>
@@ -2002,10 +2014,7 @@ public class MCServerService : IMCServerService
                     });
                 }
 
-                if (_activeServers.ContainsKey(instanceId))
-                {
-                    HandleServerExit(instanceId, context.FinalExitCode);
-                }
+                HandleServerExit(instanceId, context, context.FinalExitCode);
             }
         }
     }
