@@ -1532,14 +1532,11 @@ public class MCServerService : IMCServerService
                     {
                         if (context.IsPtyMode && context.PtyConnection != null)
                         {
-                            byte[] ptyBytes = Encoding.UTF8.GetBytes(command + "\r\n");
-                            context.PtyConnection.WriterStream.Write(ptyBytes, 0, ptyBytes.Length);
-                            context.PtyConnection.WriterStream.Flush();
+                            WritePtyCommandClean(context.PtyConnection, command);
                         }
                         else if (context.Process != null)
                         {
-                            context.Process.StandardInput.WriteLine(command);
-                            context.Process.StandardInput.Flush();
+                            WriteStandardInputCommand(context.Process, command);
                         }
                     }
                     if (repeatCommandToLog) RecordLog(instanceId, context, $"[MSLX-Daemon] 已发送命令{(sentViaRcon ? "(RCON)" : "")}: {command}");
@@ -1554,6 +1551,37 @@ public class MCServerService : IMCServerService
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// 向 PTY 伪终端安全写入命令
+    /// </summary>
+    private static void WritePtyCommandClean(IPtyConnection pty, string command)
+    {
+        var lines = command.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            // \x05 (Ctrl+E): 移动到行尾
+            // \x15 (Ctrl+U): 清除当前行所有未回车残留字符（Unix Line Kill / JLine backward-kill-line）
+            byte[] ptyBytes = Encoding.UTF8.GetBytes("\x05\x15" + line + "\r\n");
+            pty.WriterStream.Write(ptyBytes, 0, ptyBytes.Length);
+        }
+        pty.WriterStream.Flush();
+    }
+
+    /// <summary>
+    /// 向传统标准输入流写入命令
+    /// </summary>
+    private static void WriteStandardInputCommand(Process process, string command)
+    {
+        var lines = command.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            process.StandardInput.WriteLine(line);
+        }
+        process.StandardInput.Flush();
     }
 
     /// <summary>
