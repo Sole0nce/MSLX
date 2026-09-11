@@ -272,21 +272,18 @@ const initPtyTerminal = () => {
 };
 
 const fitTerminals = () => {
-  if (!isPtyMode.value) {
-    if (logTerminalBody.value && logTerminalBody.value.clientWidth > 0 && logTerminalBody.value.clientHeight > 0) {
-      try {
-        logFitAddon?.fit();
-      } catch (e) {
-        console.warn(e);
-      }
+  if (logTerminalBody.value && logTerminalBody.value.clientWidth > 0 && logTerminalBody.value.clientHeight > 0) {
+    try {
+      logFitAddon?.fit();
+    } catch (e) {
+      console.warn(e);
     }
-  } else {
-    if (ptyTerminalBody.value && ptyTerminalBody.value.clientWidth > 0 && ptyTerminalBody.value.clientHeight > 0) {
-      try {
-        ptyFitAddon?.fit();
-      } catch (e) {
-        console.warn(e);
-      }
+  }
+  if (ptyTerminalBody.value && ptyTerminalBody.value.clientWidth > 0 && ptyTerminalBody.value.clientHeight > 0) {
+    try {
+      ptyFitAddon?.fit();
+    } catch (e) {
+      console.warn(e);
     }
   }
 };
@@ -439,9 +436,17 @@ const connectStore = async () => {
   // 订阅 PTY 状态
   if (cleanupPtyStatus) cleanupPtyStatus();
   cleanupPtyStatus = hubStore.onPtyStatus((status) => {
+    const wasRunning = serverPtyStatus.value.isRunning;
     serverPtyStatus.value = status;
     if (ptyTerm) {
       ptyTerm.options.cursorBlink = !!status.isRunning;
+      // 当服务端变为运行中状态时，即时适配并同步一次当前终端尺寸，防止因初始窗口尺寸偏差导致光标/提示错位
+      if (status.isRunning && (!wasRunning || isPtyMode.value)) {
+        fitTerminals();
+        if (ptyTerm.cols > 0 && ptyTerm.rows > 0) {
+          hubStore.resizePty(ptyTerm.cols, ptyTerm.rows);
+        }
+      }
     }
   });
 
@@ -458,8 +463,9 @@ const connectStore = async () => {
   // 发起连接
   await hubStore.connect(props.serverId);
 
-  // 如果初始处于 PTY 模式，加入 PTY 会话组
+  // 如果初始处于 PTY 模式，加入 PTY 会话组（先 fit 确保尺寸真实准确）
   if (isPtyMode.value && ptyTerm) {
+    fitTerminals();
     await hubStore.joinPtyGroup(ptyTerm.cols, ptyTerm.rows);
   }
 };
@@ -549,8 +555,11 @@ onMounted(async () => {
     resizeObserver.observe(terminalWrapper.value);
   }
 
+  await nextTick();
+  fitTerminals();
+
   await connectStore();
-  setTimeout(fitTerminals, 100);
+  window.requestAnimationFrame(fitTerminals);
 });
 
 onUnmounted(async () => {

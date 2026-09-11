@@ -65,6 +65,7 @@ public class MCServerService : IMCServerService
 
     private readonly ConcurrentDictionary<uint, ServerContext> _activeServers = new(); // 存储运行中实例的状态数据
     private readonly ConcurrentDictionary<uint, bool> _restartingServers = new(); // 存储正在重启的实例ID
+    private readonly ConcurrentDictionary<uint, (int cols, int rows)> _preferredTerminalSizes = new(); // 记录客户端首选终端尺寸
     private const int MaxLogLines = 1000;
 
     // 匹配玩家进入/离开的正则表达式
@@ -976,11 +977,19 @@ public class MCServerService : IMCServerService
                     if (!envDict.ContainsKey("LANG")) envDict["LANG"] = !string.IsNullOrWhiteSpace(hostLang) ? hostLang : "zh_CN.UTF-8";
                     if (!envDict.ContainsKey("LC_ALL")) envDict["LC_ALL"] = envDict["LANG"];
 
+                    int initCols = 120;
+                    int initRows = 30;
+                    if (_preferredTerminalSizes.TryGetValue(instanceId, out var prefSize) && prefSize.cols > 0 && prefSize.rows > 0)
+                    {
+                        initCols = prefSize.cols;
+                        initRows = prefSize.rows;
+                    }
+
                     var ptyOptions = new PtyOptions
                     {
                         Name = $"MSLX-{instanceId}",
-                        Cols = 120,
-                        Rows = 30,
+                        Cols = initCols,
+                        Rows = initRows,
                         Cwd = serverInfo.Base,
                         App = exec,
                         CommandLine = SplitCommandLineArgs(args),
@@ -1030,12 +1039,12 @@ public class MCServerService : IMCServerService
                                 int read = await ptyConnection.ReaderStream.ReadAsync(buffer, 0, buffer.Length, ptyCts.Token);
                                 if (read <= 0) break;
 
-                                string rawChunk = Encoding.UTF8.GetString(buffer, 0, read);
+                                int charCount = decoder.GetChars(buffer, 0, read, chars, 0, false);
+                                string rawChunk = new string(chars, 0, charCount);
                                 context.PtyHistory.Enqueue(rawChunk);
                                 while (context.PtyHistory.Count > 100) context.PtyHistory.TryDequeue(out _);
                                 await _hubContext.Clients.Group("pty_" + instanceId).SendAsync("ReceivePtyData", rawChunk);
 
-                                int charCount = decoder.GetChars(buffer, 0, read, chars, 0, false);
                                 for (int i = 0; i < charCount; i++)
                                 {
                                     char c = chars[i];
@@ -1656,6 +1665,11 @@ public class MCServerService : IMCServerService
     /// </summary>
     public bool ResizePty(uint instanceId, int cols, int rows)
     {
+        if (cols > 0 && rows > 0)
+        {
+            _preferredTerminalSizes[instanceId] = (cols, rows);
+        }
+
         if (_activeServers.TryGetValue(instanceId, out var context))
         {
             if (context.IsPtyMode && context.PtyConnection != null)

@@ -115,6 +115,15 @@ namespace MSLX.Daemon.Hubs
 
             await Groups.AddToGroupAsync(Context.ConnectionId, "pty_" + instanceId);
 
+            bool isPty = _mcServerService.IsServerPtyMode(instanceId);
+            bool isRunning = _mcServerService.IsServerRunning(instanceId);
+
+            // 先调整 PTY 伪终端至客户端当前真实尺寸（并记录首选尺寸）
+            if (cols > 0 && rows > 0)
+            {
+                _mcServerService.ResizePty(instanceId, cols, rows);
+            }
+
             // 回放最近的 PTY 输出历史给刚加入的客户端
             var ptyHistory = _mcServerService.GetPtyHistory(instanceId);
             if (ptyHistory.Any())
@@ -123,14 +132,6 @@ namespace MSLX.Daemon.Hubs
                 {
                     await Clients.Caller.SendAsync("ReceivePtyData", chunk);
                 }
-            }
-
-            bool isPty = _mcServerService.IsServerPtyMode(instanceId);
-            bool isRunning = _mcServerService.IsServerRunning(instanceId);
-
-            if (isPty && cols > 0 && rows > 0)
-            {
-                _mcServerService.ResizePty(instanceId, cols, rows);
             }
 
             await Clients.Caller.SendAsync("PtyStatus", new { isPty, isRunning });
