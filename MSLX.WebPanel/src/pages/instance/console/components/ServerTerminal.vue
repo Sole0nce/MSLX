@@ -134,7 +134,7 @@ const getTermTheme = (isDark: boolean) => {
       cursorAccent: '#18181b',
       selectionBackground: `${primaryColor}40`,
       selectionForeground: '#ffffff',
-      black: '#18181b',
+      black: '#a1a1aa',
       red: '#f87171',
       green: '#34d399',
       yellow: '#fbbf24',
@@ -183,6 +183,51 @@ const getTermTheme = (isDark: boolean) => {
 // 日志染色
 c.enabled = true;
 const colorizeLog = (log: string): string => colorizeServerLog(log);
+
+// 为 PTY 终端原始数据流应用实时日志染色规则
+const colorizePtyChunk = (chunk: string): string => {
+  if (!chunk) return chunk;
+
+  // 按换行符切分，保护终端换行控制符
+  const parts = chunk.split(/(\r?\n)/);
+  const result: string[] = [];
+
+  for (let i = 0; i < parts.length; i++) {
+    let part = parts[i];
+    if (part === '\n' || part === '\r\n') {
+      result.push(part);
+    } else if (part.length > 0) {
+      // 提取行首可能附带的光标移动/擦除控制序列（如 \r、\x1b[2K 等），使正则能正确定位行首的时间戳
+      let prefix = '';
+      // eslint-disable-next-line no-control-regex
+      const matchPrefix = part.match(/^(\x1b\[[0-9;]*[a-zA-Z]|\r)+/);
+      if (matchPrefix) {
+        prefix = matchPrefix[0];
+        part = part.slice(prefix.length);
+      }
+
+      // 判断是否包含 Minecraft 服务端标准日志结构特征
+      const isLogLine =
+        part.includes('INFO') ||
+        part.includes('WARN') ||
+        part.includes('ERROR') ||
+        part.includes('FATAL') ||
+        part.includes('DEBUG') ||
+        /^\[\d{2}:\d{2}:\d{2}/.test(part) ||
+        part.includes('[MSLX') ||
+        part.includes('[System]') ||
+        part.startsWith('>>>');
+
+      if (isLogLine) {
+        result.push(prefix + colorizeLog(part));
+      } else {
+        result.push(prefix + part);
+      }
+    }
+  }
+
+  return result.join('');
+};
 
 const terminalFontFamily =
   '"Maple Mono", "Maple Mono CN", "Cascadia Code", Consolas, Menlo, "PingFang SC", "Microsoft YaHei", monospace';
@@ -430,7 +475,7 @@ const connectStore = async () => {
   // 订阅 PTY 原始数据流
   if (cleanupPtyData) cleanupPtyData();
   cleanupPtyData = hubStore.onPtyData((chunk) => {
-    ptyTerm?.write(chunk);
+    ptyTerm?.write(colorizePtyChunk(chunk));
   });
 
   // 订阅 PTY 状态
