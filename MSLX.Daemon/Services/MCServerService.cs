@@ -107,7 +107,11 @@ public class MCServerService : IMCServerService
 
             lock (context.StateLock)
             {
-                if (!context.IsProcessExited || !context.IsStdoutClosed || !context.IsStderrClosed)
+                bool isRunning = context.IsPtyMode
+                    ? !context.IsProcessExited
+                    : (!context.IsProcessExited || !context.IsStdoutClosed || !context.IsStderrClosed);
+
+                if (isRunning)
                 {
                     return true;
                 }
@@ -146,7 +150,11 @@ public class MCServerService : IMCServerService
             {
                 lock (context.StateLock)
                 {
-                    if (!context.IsProcessExited || !context.IsStdoutClosed || !context.IsStderrClosed)
+                    bool isRunning = context.IsPtyMode
+                        ? !context.IsProcessExited
+                        : (!context.IsProcessExited || !context.IsStdoutClosed || !context.IsStderrClosed);
+
+                    if (isRunning)
                     {
                         return (2, "运行中");
                     }
@@ -1002,6 +1010,7 @@ public class MCServerService : IMCServerService
                             context.IsProcessExited = true;
                             context.FinalExitCode = ptyConnection.ExitCode;
                         }
+                        try { context.PtyReadCts?.CancelAfter(300); } catch { }
                         CheckAndHandleTrueExit(instanceId, context);
                     };
 
@@ -1174,12 +1183,20 @@ public class MCServerService : IMCServerService
 
                             lock (context.StateLock)
                             {
-                                // 子进程还在
-                                isSchrodingerState = context.IsProcessExited &&
-                                                     (!context.IsStdoutClosed || !context.IsStderrClosed);
-                                // 全关掉了
-                                isCompletelyDead = context.IsProcessExited && context.IsStdoutClosed &&
-                                                   context.IsStderrClosed;
+                                if (context.IsPtyMode)
+                                {
+                                    isCompletelyDead = context.IsProcessExited;
+                                    isSchrodingerState = false;
+                                }
+                                else
+                                {
+                                    // 子进程还在
+                                    isSchrodingerState = context.IsProcessExited &&
+                                                         (!context.IsStdoutClosed || !context.IsStderrClosed);
+                                    // 全关掉了
+                                    isCompletelyDead = context.IsProcessExited && context.IsStdoutClosed &&
+                                                       context.IsStderrClosed;
+                                }
                             }
 
                             if (isCompletelyDead)
@@ -1234,7 +1251,14 @@ public class MCServerService : IMCServerService
                                             (server?.StopCommand ?? "") == "^c")
                                         {
                                             RecordLog(instanceId, context, ">>> [MSLX-Daemon] 准备发送中断信号 (^C)...");
-                                            ProcessHelper.SendCtrlC(context.Process);
+                                            if (context.IsPtyMode && context.PtyConnection != null)
+                                            {
+                                                try { context.PtyConnection.WriterStream.Write(new byte[] { 0x03 }, 0, 1); } catch { }
+                                            }
+                                            else
+                                            {
+                                                ProcessHelper.SendCtrlC(context.Process);
+                                            }
                                             RecordLog(instanceId, context, "[MSLX] 已发送中断信号，正在等待服务退出...");
                                         }
                                         else
@@ -1246,9 +1270,9 @@ public class MCServerService : IMCServerService
                                         }
 
                                         // 关闭输入流
-                                        if (!server?.Args?.ToLower().Contains("mcdreforged") ?? true)
+                                        if (!context.IsPtyMode && (!server?.Args?.ToLower().Contains("mcdreforged") ?? true))
                                         {
-                                            context.Process.StandardInput.Close();
+                                            try { context.Process.StandardInput.Close(); } catch { }
                                         }
                                     }
 
@@ -1455,7 +1479,7 @@ public class MCServerService : IMCServerService
                 lock (context.StateLock)
                 {
                     // 子进程溜出来情况的处理
-                    if (context.IsProcessExited && (!context.IsStdoutClosed || !context.IsStderrClosed))
+                    if (!context.IsPtyMode && context.IsProcessExited && (!context.IsStdoutClosed || !context.IsStderrClosed))
                     {
                         RecordLog(instanceId, context, ">>> [MSLX-Daemon] 当前服务端处于特殊的进程状态，已脱离MSLX的进程监控。");
                         RecordLog(instanceId, context, ">>> [MSLX-Daemon] 因此目前无法向服务端发送指令，您可以重启后再尝试或在游戏内进行指令输入。");
@@ -1942,10 +1966,27 @@ public class MCServerService : IMCServerService
             // 来过了就别来了哇
             if (context.HasTriggeredExit) return;
 
-            // 主进程关了 标准流都EOF了
-            if (context.IsProcessExited && context.IsStdoutClosed && context.IsStderrClosed)
+            // 模式区分：
+            // PTY 模式下，当 pty 进程退出时，进程已经确定退出；由于 Windows ConPTY 的 ReaderStream 在子进程退出时不会主动关闭 EOF，
+            // 只要 context.IsProcessExited 即可触发退出，并取消读取流和释放 pty。
+            // 普通标准流模式下，需确保 stdout 和 stderr 均读到 EOF 避免丢日志。
+            bool shouldExit = context.IsPtyMode
+                ? context.IsProcessExited
+                : (context.IsProcessExited && context.IsStdoutClosed && context.IsStderrClosed);
+
+            if (shouldExit)
             {
                 context.HasTriggeredExit = true;
+
+                if (context.IsPtyMode)
+                {
+                    Task.Run(async () =>
+                    {
+                        await Task.Delay(300);
+                        try { context.PtyReadCts?.Cancel(); } catch { }
+                        try { context.PtyConnection?.Dispose(); } catch { }
+                    });
+                }
 
                 if (_activeServers.ContainsKey(instanceId))
                 {
