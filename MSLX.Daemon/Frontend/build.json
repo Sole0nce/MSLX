@@ -1,6 +1,6 @@
 {
-  "version": "1.6.3",
-  "buildTime": "2026-09-11 23:53:31",
+  "version": "1.6.3.1",
+  "buildTime": "2026-09-12 15:44:02",
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-css": "^6.3.1",
@@ -78,10 +78,34 @@
     "vite-svg-loader": "^5.1.0",
     "vue-tsc": "^2.0.26"
   },
-  "commitId": "55101df63da6f8c031e61e33d84765c7f44e6346",
-  "commitMsg": "chore(daemon): PTY 开关新增测试信息提醒",
+  "commitId": "aca53717113b9eb73edd72b071976aaf145826ee",
+  "commitMsg": "fix(webpanel): 修复浅色模式下选中终端日志颜色可读性过差的问题",
   "commitAuthor": "luluxiaoyu",
   "history": [
+    {
+      "commitId": "aca53717113b9eb73edd72b071976aaf145826ee",
+      "commitTime": "2026-09-12 15:43:18 +0800",
+      "commitAuthor": "luluxiaoyu",
+      "commitMsg": "fix(webpanel): 修复浅色模式下选中终端日志颜色可读性过差的问题"
+    },
+    {
+      "commitId": "1aac5741224ca56498a919eab14b3236625d3cbe",
+      "commitTime": "2026-09-12 15:37:16 +0800",
+      "commitAuthor": "luluxiaoyu",
+      "commitMsg": "fix(daemon): 修复Windows环境下启用仿真终端后内置指令不能正常执行的问题"
+    },
+    {
+      "commitId": "1a0d4b2f5a84c294459f2416bc4de5fb10174b22",
+      "commitTime": "2026-09-11 23:54:42 +0800",
+      "commitAuthor": "小宇",
+      "commitMsg": "Merge pull request #244 from MSLTeam/dev"
+    },
+    {
+      "commitId": "7592197219e0881ddf87924830e991952dc4e5a0",
+      "commitTime": "2026-09-11 23:53:44 +0800",
+      "commitAuthor": "luluxiaoyu",
+      "commitMsg": "bumpver(daemon & webpanel & desktop): 更新到 v1.6.3 版本"
+    },
     {
       "commitId": "55101df63da6f8c031e61e33d84765c7f44e6346",
       "commitTime": "2026-09-11 23:52:44 +0800",
@@ -357,30 +381,6 @@
       "commitTime": "2026-08-19 14:03:47 +0800",
       "commitAuthor": "luluxiaoyu",
       "commitMsg": "bumpver(daemon & webpanel & desktop): 更新到v1.6.0版本"
-    },
-    {
-      "commitId": "0ac4dcaa8a9fea319e5cadd0724961ae7c415e5c",
-      "commitTime": "2026-08-19 14:02:57 +0800",
-      "commitAuthor": "luluxiaoyu",
-      "commitMsg": "fix(webpanel): 修复后台任务api定义错误问题"
-    },
-    {
-      "commitId": "12db15708deea60ab10c81444aa37ca64a501f75",
-      "commitTime": "2026-08-19 13:51:05 +0800",
-      "commitAuthor": "luluxiaoyu",
-      "commitMsg": "feat(desktop & daemon & webpanel): 控制台新增RCON通讯模式"
-    },
-    {
-      "commitId": "96231d3ee7c755b48d54625cef988e3f18edb9f1",
-      "commitTime": "2026-08-19 12:14:09 +0800",
-      "commitAuthor": "luluxiaoyu",
-      "commitMsg": "feat(daemon & sdk): 插件支持调用后台任务池"
-    },
-    {
-      "commitId": "55c8b3153af5ca07e893d171527028eee8e0dc1c",
-      "commitTime": "2026-08-19 11:57:06 +0800",
-      "commitAuthor": "luluxiaoyu",
-      "commitMsg": "perf(daemon & webpanel): 打包服务端功能集成到后台任务"
     }
   ]
 }

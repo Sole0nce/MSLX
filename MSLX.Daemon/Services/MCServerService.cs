@@ -1603,12 +1603,27 @@ public class MCServerService : IMCServerService
     private static void WritePtyCommandClean(IPtyConnection pty, string command)
     {
         var lines = command.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        bool isWindows = OperatingSystem.IsWindows();
+
         foreach (var line in lines)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-            // \x05 (Ctrl+E): 移动到行尾
-            // \x15 (Ctrl+U): 清除当前行所有未回车残留字符（Unix Line Kill / JLine backward-kill-line）
-            byte[] ptyBytes = Encoding.UTF8.GetBytes("\x05\x15" + line + "\r\n");
+
+            string payload;
+            if (isWindows)
+            {
+                // Windows 下先发送回车换行提交可能残留的半截字符，确保在新行干净执行。
+                payload = "\r\n" + line + "\r\n";
+            }
+            else
+            {
+                // macOS / Linux (POSIX PTY):
+                // \x05 (Ctrl+E): 移动到行尾
+                // \x15 (Ctrl+U): 清除当前行所有未回车残留字符
+                payload = "\x05\x15" + line + "\n";
+            }
+
+            byte[] ptyBytes = Encoding.UTF8.GetBytes(payload);
             pty.WriterStream.Write(ptyBytes, 0, ptyBytes.Length);
         }
         pty.WriterStream.Flush();
