@@ -123,6 +123,27 @@ const getThemePrimaryColor = () => {
   return color || '#0052d9';
 };
 
+// 处理浅色模式下的选择背景
+const getLightSelectionBg = (hexColor: string, weight = 0.28): string => {
+  let color = hexColor.trim();
+  if (!color.startsWith('#')) return '#bfdbfe'; // 默认优雅明亮的淡天蓝
+  if (color.length === 4) {
+    color = `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`;
+  }
+  if (color.length >= 7) {
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    if (!isNaN(r) && !isNaN(g) && !isNaN(b)) {
+      const nr = Math.round(r * weight + 255 * (1 - weight));
+      const ng = Math.round(g * weight + 255 * (1 - weight));
+      const nb = Math.round(b * weight + 255 * (1 - weight));
+      return `#${nr.toString(16).padStart(2, '0')}${ng.toString(16).padStart(2, '0')}${nb.toString(16).padStart(2, '0')}`;
+    }
+  }
+  return '#bfdbfe';
+};
+
 // 动态生成 xterm 原生主题配置
 const getTermTheme = (isDark: boolean) => {
   const primaryColor = getThemePrimaryColor();
@@ -159,8 +180,9 @@ const getTermTheme = (isDark: boolean) => {
     foreground: '#18181b',
     cursor: primaryColor, // 光标跟随系统品牌主题色
     cursorAccent: '#ffffff',
-    selectionBackground: `${primaryColor}30`,
-    selectionForeground: '#0f172a',
+    selectionBackground: getLightSelectionBg(primaryColor, 0.28), // 优雅明亮的浅色选区（不透明 hex，防止 transparent 黑底混合）
+    selectionInactiveBackground: getLightSelectionBg(primaryColor, 0.16),
+    selectionForeground: undefined, // 不强行覆盖前景色，完整保留文本原有的语法高亮与对比度
     black: '#18181b',
     red: '#dc2626',
     green: '#16a34a',
